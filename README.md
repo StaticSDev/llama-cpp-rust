@@ -4,29 +4,32 @@ Rust rewrite of [llama.cpp](https://github.com/ggml-org/llama.cpp).
 
 ## State
 
-Dry port, wave 1 done. Source is translated from pinned upstream commit
-`15fcfc7357f8de73671d39e7d8c594e1beb3052d`. No build or tests have been run.
+Port from pinned upstream commit `15fcfc7357f8de73671d39e7d8c594e1beb3052d`.
+`cargo check`, `cargo build` and `cargo test` all pass: 157 tests, 0 failures.
 Each module keeps the base name of its C/C++ source.
 
 Ported modules:
 
-- `gguf`, `vocab`, `sampler`, `kv_cache`, `grammar`, `batch`
-- `arch`, `hparams`, `json`, `unicode`, `chat`
-- `core`, `impl`, `cparams`, `io`
+- core: `core`, `impl`, `cparams`, `io`
+- ggml: `ggml/types`, `ggml/tensor`, `ggml/quants`, `ggml/alloc`,
+  `ggml/backend`, `ggml/opt`, `ggml/threading`
+- llama: `gguf`, `vocab`, `sampler`, `kv_cache`, `grammar`, `batch`, `arch`,
+  `hparams`, `json`, `unicode`, `chat`, `mmap`, `model`, `model_loader`,
+  `context`, `graph`, `memory`, `quant`, `adapter`, `api`
+- common: `common`
 
 Not ported yet:
 
-- ggml tensor library, backends and quantizers
-- model loader, model, context, compute graph and memory variants
-- tools, server, examples and conversion scripts
+- tools, server, examples, conversion scripts
+- backend-specific GPU/RPC/Hexagon paths and real numeric graph execution
 
 The unmodified C/C++ tree is downloaded locally into `reference/llama.cpp` and
 ignored by git. It is the translation reference, not part of this repository.
 
 ## Layout
 
-- `src/core.rs` - shared token/error/RNG primitives.
-- `src/<name>.rs` - one ported llama.cpp module per file.
+- `src/<module>/` - one llama.cpp module per directory, split into subfiles.
+- `src/<module>/mod.rs` - module declarations and re-exports.
 - `reference/` - local upstream checkout, gitignored.
 
 ## License
