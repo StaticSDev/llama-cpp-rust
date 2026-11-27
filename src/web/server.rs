@@ -1,7 +1,7 @@
 //! Tiny std-only HTTP/1.1 server for the chat UI and generation API.
 
 use std::fs;
-use std::io::{self, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::time::Duration;
