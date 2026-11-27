@@ -23,7 +23,12 @@ pub fn serve(listener: TcpListener, weights: Weights, model_path: String) {
         match stream {
             Ok(stream) => {
                 if let Err(err) = handle(&stream, &weights, &model_path) {
-                    eprintln!("connection error: {err}");
+                    if !matches!(
+                        err.kind(),
+                        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                    ) {
+                        eprintln!("connection error: {err}");
+                    }
                 }
             }
             Err(err) => eprintln!("accept error: {err}"),
