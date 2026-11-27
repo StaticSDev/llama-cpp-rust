@@ -4,7 +4,6 @@
 //! live in `unicode_data.rs`; the hash maps of the original are sorted arrays
 //! here, so lookups use binary search instead of `std::collections`.
 
-#[path = "unicode_data.rs"]
 pub mod unicode_data;
 
 use crate::core::{Error, Result};
