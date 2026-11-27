@@ -3,14 +3,14 @@
 use super::*;
 use crate::core::{Error, Result, Token, LLAMA_TOKEN_NULL};
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap};
 
 // ---------------------------------------------------------------------------
 // tokenizer state and sessions
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug)]
-struct LlmSymbol {
+pub(crate) struct LlmSymbol {
     pub(crate) prev: i32,
     pub(crate) next: i32,
     pub(crate) text: Vec<u8>,
@@ -32,7 +32,7 @@ impl LlmSymbol {
     }
 }
 
-struct SpmBigram {
+pub(crate) struct SpmBigram {
     pub(crate) left: i32,
     pub(crate) right: i32,
     pub(crate) score: f32,
@@ -58,7 +58,7 @@ impl PartialOrd for SpmBigram {
     }
 }
 
-struct BpeBigram {
+pub(crate) struct BpeBigram {
     pub(crate) left: i32,
     pub(crate) right: i32,
     pub(crate) rank: i32,
@@ -107,6 +107,7 @@ pub(crate) struct RwkvData {
 
 #[derive(Clone, Debug)]
 pub(crate) struct Plamo2Data {
+    #[allow(dead_code)]
     pub(crate) tokens: Vec<String>,
     pub(crate) bytes: Vec<Token>,
     pub(crate) to_suffix_id: HashMap<i64, i32>,
@@ -462,6 +463,7 @@ impl<'a> BpeSession<'a> {
         output.push(token_id);
     }
 
+    #[allow(dead_code)]
     pub(crate) fn append_bos(&self, output: &mut Vec<Token>) -> bool {
         if self.vocab.get_add_bos() {
             output.push(self.vocab.token_bos());
@@ -470,6 +472,7 @@ impl<'a> BpeSession<'a> {
         false
     }
 
+    #[allow(dead_code)]
     pub(crate) fn append_eos(&self, output: &mut Vec<Token>) -> bool {
         if self.vocab.get_add_eos() {
             output.push(self.vocab.token_eos());
@@ -478,6 +481,7 @@ impl<'a> BpeSession<'a> {
         false
     }
 
+    #[allow(dead_code)]
     pub(crate) fn check_double_bos_eos(&self, output: &[Token]) {
         // The warnings are omitted; the checks are kept in the same order.
         let _ = self.vocab.get_add_bos() && output.get(1) == Some(&self.vocab.token_bos());
@@ -1292,7 +1296,6 @@ impl Plamo2Data {
         suffixes.sort_by(|a, b| a.iter().rev().cmp(b.iter().rev()));
 
         // Byte length of each prefix of the suffix, by code point
-        let mut prefix_ends: Vec<usize> = Vec::new();
         fn get_prefix_ends(suffix: &[u8]) -> Vec<usize> {
             let mut out = Vec::new();
             let mut i = 0usize;
@@ -1310,7 +1313,7 @@ impl Plamo2Data {
         for suffix in &suffixes {
             suffix_to_id.insert(suffix.clone(), num_pieces);
             if !suffix.is_empty() {
-                prefix_ends = get_prefix_ends(suffix);
+                let prefix_ends = get_prefix_ends(suffix);
                 let first_bytes = &suffix[..prefix_ends[0]];
                 let first_str = std::str::from_utf8(first_bytes).unwrap_or("");
                 let first_cpt = unicode_cpts_from_utf8(first_str).first().copied().unwrap_or(0xfffd);
@@ -1343,7 +1346,7 @@ impl Plamo2Data {
 
         for suffix in &suffixes {
             // Add all prefixes of the suffix to the table (in decreasing order of length)
-            prefix_ends = get_prefix_ends(suffix);
+            let prefix_ends = get_prefix_ends(suffix);
             for &piece_length in prefix_ends.iter().rev() {
                 let piece = &suffix[..piece_length];
                 let score = match suffix_to_score.get(piece) {

@@ -1,9 +1,7 @@
 //! Longest-prefix trie used by the tokenizers.
 
-use super::*;
-use crate::core::{Error, Result, Token, LLAMA_TOKEN_NULL};
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+use crate::core::Token;
+use std::collections::BTreeMap;
 
 // no recursion: a token from the GGUF can be long
 #[derive(Clone, Debug, Default)]

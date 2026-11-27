@@ -1,9 +1,6 @@
 //! Unit tests for pure helpers.
 
 use super::*;
-use crate::core::{Error, Result, Token, LLAMA_TOKEN_NULL};
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 
     #[test]
     fn gpt2_byte_map_roundtrips() {

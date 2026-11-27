@@ -2,8 +2,7 @@
 
 use super::*;
 use crate::core::{Error, Result, Token, LLAMA_TOKEN_NULL};
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+use std::collections::{BTreeSet, HashMap};
 
 // ---------------------------------------------------------------------------
 // metadata keys and loader input
@@ -1127,7 +1126,7 @@ impl Impl {
     pub(crate) fn load_specials(&mut self, ml: &Metadata) -> Result<()> {
         // special tokens
         let n = self.id_to_token.len();
-        let mut load_special = |key: Kv, field: &mut Token| {
+        let load_special = |key: Kv, field: &mut Token| {
             // defaults out of vocab range are disabled
             if *field >= 0 && *field as usize >= n {
                 *field = LLAMA_TOKEN_NULL;
@@ -1161,7 +1160,6 @@ impl Impl {
         load_special(Kv::TOKENIZER_PREFIX_ID, &mut self.special_fim_pre_id);
         load_special(Kv::TOKENIZER_SUFFIX_ID, &mut self.special_fim_suf_id);
         load_special(Kv::TOKENIZER_MIDDLE_ID, &mut self.special_fim_mid_id);
-        drop(load_special);
 
         // Handle add_bos, add_eos and add_sep
         {

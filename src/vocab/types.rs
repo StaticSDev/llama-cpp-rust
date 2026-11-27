@@ -2,8 +2,6 @@
 
 use super::*;
 use crate::core::{Error, Result, Token, LLAMA_TOKEN_NULL};
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 
 // ---------------------------------------------------------------------------
 // types and constants from llama.h / llama-vocab.h
@@ -505,6 +503,7 @@ enum CatKind {
     Symbol,
     Control,
     Whitespace,
+    #[allow(dead_code)]
     Space,
     Word,
     Han,

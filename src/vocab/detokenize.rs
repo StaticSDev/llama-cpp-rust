@@ -1,9 +1,7 @@
 //! Detokenization path and its helpers.
 
 use super::*;
-use crate::core::{Error, Result, Token, LLAMA_TOKEN_NULL};
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+use crate::core::{Token, LLAMA_TOKEN_NULL};
 
 pub(crate) fn llama_escape_whitespace(text: &mut String) {
     replace_all(text, " ", ESCAPED_SPACE);
@@ -85,7 +83,7 @@ impl Impl {
         }
         let token_text = &self.id_to_token[token as usize].text;
 
-        let mut piece: Vec<u8>;
+        let piece: Vec<u8>;
         let mut apply_lstrip = true;
 
         match self.vtype {

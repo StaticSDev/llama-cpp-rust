@@ -16,8 +16,7 @@ pub mod metadata;
 mod tests;
 
 pub use types::*;
-pub use trie::*;
+pub(crate) use trie::*;
 pub use sessions::*;
-pub use tokenize::*;
-pub use detokenize::*;
+pub(crate) use detokenize::*;
 pub use metadata::*;

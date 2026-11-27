@@ -1,12 +1,10 @@
 //! Tokenization path and its helpers.
 
 use super::*;
-use crate::core::{Error, Result, Token, LLAMA_TOKEN_NULL};
-use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
+use crate::core::Token;
 
 #[derive(Clone, Debug)]
-enum Fragment<'a> {
+pub(crate) enum Fragment<'a> {
     Token(Token),
     RawText {
         raw_text: &'a str,
