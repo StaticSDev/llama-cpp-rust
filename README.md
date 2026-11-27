@@ -51,6 +51,20 @@ target/release/llama-rs \
 The runtime dequantizes one weight row at a time, so it is memory-safe but slow
 on CPU. Greedy (`--temp 0`) and temperature + top-p sampling are supported.
 
+## Web chat
+
+A minimal monochrome chat UI is served by the same Rust binary:
+
+```sh
+cargo build --release --bin llama-web
+target/release/llama-web \
+  --model models/Qwen3.5-4B-Q4_K_M.gguf \
+  --port 8080
+```
+
+Open `http://127.0.0.1:8080/`. The page calls `POST /api/chat`.
+One request is processed at a time because generation is CPU-bound.
+
 ## License
 
 Original code: MIT, Copyright (c) 2023-2026 ggml authors. See `LICENSE`.
