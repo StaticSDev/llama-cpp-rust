@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn tq2_0_round_trip() {
-        let x: Vec<f32> = (0..QK_K).map(|i| ((i % 3) as f32 - 1.0)).collect();
+        let x: Vec<f32> = (0..QK_K).map(|i| (i % 3) as f32 - 1.0).collect();
         let mut b = [BlockTq2_0 {
             qs: [0; QK_K / 4],
             d: 0,
@@ -189,7 +189,7 @@ mod tests {
 
     #[test]
     fn tq1_0_round_trip() {
-        let x: Vec<f32> = (0..QK_K).map(|i| ((i % 3) as f32 - 1.0)).collect();
+        let x: Vec<f32> = (0..QK_K).map(|i| (i % 3) as f32 - 1.0).collect();
         let mut b = [BlockTq1_0 {
             qs: [0; (QK_K - 4 * QK_K / 64) / 5],
             qh: [0; QK_K / 64],

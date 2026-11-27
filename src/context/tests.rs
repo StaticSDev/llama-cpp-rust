@@ -3,7 +3,6 @@ use std::rc::Rc;
 
 use crate::batch::BatchExt;
 use crate::core::Token;
-use crate::cparams::PoolingType;
 use crate::hparams::Hparams;
 
 use super::model::{Arch, Model, VocabInfo};

@@ -1,6 +1,7 @@
 //! Unit tests for pure helpers.
     use super::*;
 
+    #[allow(dead_code)]
     fn make_ubatch(n_tokens: usize, seq_id: LSeqId) -> UBatch {
         let mut ub = UBatch::ubatch_reserve(n_tokens, 1, true);
         ub.seq_id_unq[0] = seq_id;
