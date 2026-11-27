@@ -13,8 +13,8 @@ use crate::core::{Error, Result};
 use super::imatrix::{broadcast, remap_imatrix, SideData};
 use super::kernels::Quantizer;
 use super::names::{
-    tensor_allows_quantization, tensor_get_category, tensor_name_match_output_weight,
-    tensor_name_match_token_embd, TensorCategory,
+    tensor_allows_quantization, tensor_name_match_output_weight,
+    tensor_name_match_token_embd,
 };
 use super::params::QuantizeParams;
 use super::regex_lite::regex_match;
@@ -24,7 +24,7 @@ use super::target_metrics::{
     winsorize_values, MseCache, QuantError, TensorScore, WceCache,
 };
 use super::target_types::*;
-use super::types::{fallback_type_for, QTensor, QType, TYPE_COUNT};
+use super::types::{fallback_type_for, QTensor, QType};
 
 const STAT_NAMES: [&str; 5] = ["sum_sq", "h_norm", "l2_dist", "cossim", "pearson"];
 
@@ -164,13 +164,13 @@ fn save_state(path: &str, model_id: u64, all: &[TypeChoice], tensors: &[QTensor]
             return;
         }
     };
-    let mut write_u64 =
+    let write_u64 =
         |v: u64, f: &mut File| -> std::io::Result<()> { f.write_all(&v.to_le_bytes()) };
-    let mut write_i32 =
+    let write_i32 =
         |v: i32, f: &mut File| -> std::io::Result<()> { f.write_all(&v.to_le_bytes()) };
-    let mut write_f32 =
+    let write_f32 =
         |v: f32, f: &mut File| -> std::io::Result<()> { f.write_all(&v.to_le_bytes()) };
-    let mut write_f64 =
+    let write_f64 =
         |v: f64, f: &mut File| -> std::io::Result<()> { f.write_all(&v.to_le_bytes()) };
     let ok = (|| -> std::io::Result<()> {
         write_u64(STATE_MAGIC, &mut ofs)?;
@@ -372,7 +372,7 @@ pub fn simplify_pareto(candidates: &mut Vec<TypeScores>) {
 /// Build the CNIF scores used to scale candidate errors.
 fn build_cnif(
     tensors: &[QTensor],
-    metadata: &[TensorMetadata],
+    _metadata: &[TensorMetadata],
     qs: &QuantizeState,
     values: Option<&SideData>,
     activations: Option<&SideData>,
@@ -535,7 +535,7 @@ fn process_tensor(
     } else {
         tensor_nbytes
     };
-    let mut row_buf = vec![0u8; row_bytes];
+    let _row_buf = vec![0u8; row_bytes];
 
     for slice in 0..ne2 {
         let mut rng =
@@ -1104,7 +1104,7 @@ pub fn target_bpw_type(
         mapped,
     );
     let checkpoint = checkpoint_path(&params, model_name, arch_name, id);
-    let mut bpw_data = if !params.state_file.is_empty() {
+    let bpw_data = if !params.state_file.is_empty() {
         load_state(&checkpoint, id)
     } else {
         HashMap::new()
@@ -1280,7 +1280,7 @@ pub fn target_bpw_type(
         format!("bpw {:.4}", params.target_bpw)
     };
     let budget_bytes = if !clamped {
-        let mut b = total_budget.saturating_sub(total_fixed);
+        let b = total_budget.saturating_sub(total_fixed);
         if !pinned_tensors.is_empty() && b > max_total {
             crate::llama_log_warn!("\ttarget_bpw_type: target {} is not reachable with the pinned tensors (maximum ~{}); clamping to maximum\n", requested, size_str(total_fixed + max_total));
         }

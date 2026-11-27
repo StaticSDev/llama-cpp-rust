@@ -7,7 +7,7 @@ use crate::core::{Error, Result};
 
 use super::gguf_io::{self, write_gguf, GgufKv, OutputTensor};
 use super::imatrix;
-use super::kernels::{dequantize_slab, quantize_slab, NativeQuantizer, Quantizer};
+use super::kernels::{dequantize_slab, quantize_slab, NativeQuantizer};
 use super::names::{
     tensor_allows_quantization, tensor_name_match_token_embd, tensor_requires_imatrix,
 };
@@ -24,6 +24,7 @@ const LLM_KV_SPLIT_NO: &str = "split.no";
 const LLM_KV_SPLIT_COUNT: &str = "split.count";
 const LLM_KV_SPLIT_TENSORS_COUNT: &str = "split.tensors.count";
 const LLM_KV_BLOCK_COUNT: &str = "block_count";
+#[allow(dead_code)]
 const LLM_KV_ATTENTION_SHARED_KV_LAYERS: &str = "attention.shared_kv_layers";
 
 fn kv_u32(kv: &[GgufKv], key: &str) -> u32 {
@@ -33,6 +34,7 @@ fn kv_u32(kv: &[GgufKv], key: &str) -> u32 {
         .unwrap_or(0)
 }
 
+#[allow(dead_code)]
 fn kv_i32(kv: &[GgufKv], key: &str) -> i32 {
     kv.iter()
         .find(|k| k.key == key)
@@ -383,7 +385,6 @@ pub fn llama_model_quantize_impl(
             new_size = tensor_size;
             crate::llama_log_info!("size = {:.2} MiB\n", tensor_size as f64 / 1024.0 / 1024.0);
             out_data.extend_from_slice(&t.data);
-            new_size = tensor_size;
         } else {
             let imatrix = if values.is_empty() {
                 None

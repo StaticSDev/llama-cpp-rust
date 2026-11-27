@@ -101,6 +101,7 @@ impl GgufKv {
         })
     }
 
+    #[allow(dead_code)]
     fn serialized_len(&self) -> usize {
         let mut n = 8 + self.key.len() + 4;
         if self.type_ == 9 {
@@ -304,7 +305,7 @@ pub fn read_gguf(path: &str) -> Result<LoadedGguf> {
     let alignment = get_kv(&kv, "general.alignment")
         .and_then(|k| k.as_u32())
         .unwrap_or(GGUF_ALIGNMENT as u32) as usize;
-    let meta_start = cur.pos;
+    let _meta_start = cur.pos;
     let mut meta_bytes = Vec::new();
     for k in &kv {
         k.write_to(&mut meta_bytes);
@@ -391,6 +392,7 @@ pub fn read_gguf(path: &str) -> Result<LoadedGguf> {
     })
 }
 
+#[allow(dead_code)]
 fn meta_bytes_len(bytes: &[u8]) -> usize {
     bytes.len()
 }

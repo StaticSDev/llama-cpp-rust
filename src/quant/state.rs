@@ -4,7 +4,7 @@ use crate::arch::Arch;
 use crate::core::{Error, Result};
 
 use super::names::{
-    category_is_attn_v, tensor_allows_quantization, tensor_is_expert, tensor_name_match_token_embd,
+    category_is_attn_v, tensor_allows_quantization, tensor_is_expert,
     TensorCategory,
 };
 use super::params::{FType, QuantizeParams};
