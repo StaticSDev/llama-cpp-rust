@@ -10,6 +10,8 @@ use crate::runtime::types::{ModelParams, Weight, Weights};
 use crate::vocab::metadata::Metadata;
 use crate::vocab::LlamaVocab;
 use std::collections::HashMap;
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::sync::Arc;
 
 fn key_id(ctx: &GgufContext, key: &str) -> Result<i64> {
@@ -120,6 +122,15 @@ fn build_metadata(ctx: &GgufContext) -> Metadata {
 pub fn load(path: &str) -> Result<Weights> {
     let ctx = gguf_init_from_file(path, &mut GgufInitParams::default())?;
 
+    // The GGUF reader only fills `ctx.data` when a ggml context is requested.
+    // Read the tensor blob directly so we do not also duplicate every tensor.
+    let mut file = File::open(path).map_err(|e| Error::new(format!("open {path}: {e}")))?;
+    file.seek(SeekFrom::Start(ctx.offset as u64))
+        .map_err(|e| Error::new(format!("seek tensor blob: {e}")))?;
+    let mut blob = vec![0u8; ctx.size];
+    file.read_exact(&mut blob)
+        .map_err(|e| Error::new(format!("read tensor blob: {e}")))?;
+
     let vocab_size = gguf_get_arr_n(&ctx, key_id(&ctx, "tokenizer.ggml.tokens")?);
 
     // Parsed for presence; the runtime derives head_dim from value_length.
@@ -172,7 +183,7 @@ pub fn load(path: &str) -> Result<Weights> {
 
     Ok(Weights {
         map,
-        data: Arc::new(ctx.data),
+        data: Arc::new(blob),
         params,
         vocab,
     })
