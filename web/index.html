@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="dark">
+  <title>Qwen3.5 · Local</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <span class="model" id="model">Qwen3.5 <span class="sep">·</span> Local</span>
+      <span class="status">
+        <span class="dot" id="dot" aria-hidden="true"></span>
+        <span class="status-text" id="status-text">Loading</span>
+      </span>
+    </header>
+
+    <main class="messages" id="messages" role="log" aria-label="Conversation" aria-live="polite">
+      <section class="empty" id="empty">
+        <p class="empty-title">Start a conversation.</p>
+        <p class="empty-hint">Ask a question to begin.</p>
+      </section>
+    </main>
+
+    <form class="composer" id="composer" autocomplete="off">
+      <label class="sr-only" for="prompt">Message</label>
+      <textarea id="prompt" name="prompt" rows="1" placeholder="Ask anything…"></textarea>
+      <div class="composer-foot">
+        <span class="hint">Enter to send · Shift+Enter for newline</span>
+        <button type="submit" id="send">Send</button>
+      </div>
+    </form>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
