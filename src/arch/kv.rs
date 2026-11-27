@@ -1512,7 +1512,6 @@ fn tensor_pattern(tensor: Tensor) -> Option<&'static str> {
         Tensor::RouterOut => Some("blk.%d.ffn_router_out"),
         Tensor::AttnVGate => Some("blk.%d.attn_v_gate"),
         Tensor::AttnVExps => Some("blk.%d.attn_v_exps"),
-        _ => None,
     }
 }
 
