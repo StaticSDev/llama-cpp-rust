@@ -117,7 +117,7 @@ pub fn get_rng_seed(seed: u32) -> u32 {
 }
 
 /// `std::mt19937` plus the seed and draw count, so a live RNG can be cloned.
-/// `core::Mt19937` has no `Clone`, so cloning replays draws from the seed.
+/// Cloning replays draws from the seed so the draw count stays explicit.
 #[derive(Debug)]
 struct SamplerRng {
     seed: u32,

@@ -43,6 +43,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// `canonical_f32` mirror `std::generate_canonical<double, 53>` and
 /// `std::generate_canonical<float, 24>` closely enough for a dry port; exact
 /// bit-for-bit parity with libstdc++ distributions is not verified.
+#[derive(Clone)]
 pub struct Mt19937 {
     state: [u32; 624],
     index: usize,
@@ -90,20 +91,20 @@ impl Mt19937 {
         y ^ (y >> 18)
     }
 
-    /// `std::uniform_real_distribution<double>(0, 1)`-style draw.
+    /// `std::generate_canonical<double, 53>` with a 32-bit engine.
     pub fn canonical_f64(&mut self) -> f64 {
         let mut sum = 0.0f64;
-        let mut scale = 1.0f64;
+        let mut divisor = 1.0f64;
         for _ in 0..2 {
-            sum += self.next_u32() as f64 * scale;
-            scale *= 18446744073709551616.0f64;
+            sum = sum * 4294967296.0 + self.next_u32() as f64;
+            divisor *= 4294967296.0;
         }
-        sum / 18446744073709551616.0f64
+        sum / divisor
     }
 
-    /// `std::uniform_real_distribution<float>(0, 1)`-style draw.
+    /// `std::generate_canonical<float, 24>` with a 32-bit engine.
     pub fn canonical_f32(&mut self) -> f32 {
-        (self.next_u32() >> 8) as f32 / 16777216.0f32
+        self.next_u32() as f32 / 4294967296.0f32
     }
 
     /// Normal draw used by samplers in place of `std::normal_distribution`.
@@ -116,3 +117,19 @@ impl Mt19937 {
 
 /// Alias for modules that call the engine `Rng`.
 pub type Rng = Mt19937;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canonical_draws_stay_in_unit_interval() {
+        let mut rng = Mt19937::new(1234);
+        for _ in 0..100 {
+            let f64_draw = rng.canonical_f64();
+            let f32_draw = rng.canonical_f32();
+            assert!((0.0..1.0).contains(&f64_draw));
+            assert!((0.0..1.0).contains(&f32_draw));
+        }
+    }
+}
