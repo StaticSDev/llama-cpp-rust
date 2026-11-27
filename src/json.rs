@@ -1410,6 +1410,7 @@ const HEX: &[u8; 16] = b"0123456789abcdef";
 fn write_string(s: &str, out: &mut String, replace: bool) -> Result<()> {
     let bytes = s.as_bytes();
     let mut i = 0;
+    out.push('"');
     while i < bytes.len() {
         let byte = bytes[i];
         match byte {
@@ -1438,6 +1439,7 @@ fn write_string(s: &str, out: &mut String, replace: bool) -> Result<()> {
         }
         i += 1;
     }
+    out.push('"');
     Ok(())
 }
 
@@ -1455,7 +1457,6 @@ fn dump_double(val: f64, out: &mut String) {
     let (mantissa, exponent) = magnitude.split_once('e').expect("LowerExp has an exponent");
     let exp: i32 = exponent.parse().expect("LowerExp exponent is an integer");
     let digits: String = mantissa.chars().filter(|c| *c != '.').collect();
-    let n = digits.len() as i32;
 
     if exp >= -4 && exp < 21 {
         if exp >= 0 {
