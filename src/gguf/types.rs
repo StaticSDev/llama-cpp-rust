@@ -22,7 +22,7 @@ pub const GGUF_MAX_ARRAY_ELEMENTS: usize = 1024 * 1024 * 1024;
 // stays self-contained until the ggml port is wired in.
 pub const GGML_MAX_DIMS: usize = 4;
 pub const GGML_MAX_NAME: usize = 64;
-pub const GGML_TYPE_COUNT: usize = 31;
+pub const GGML_TYPE_COUNT: usize = 44;
 
 // ---------------------------------------------------------------------------
 // gguf_type
@@ -139,34 +139,39 @@ pub enum GgmlType {
     F16 = 1,
     Q4_0 = 2,
     Q4_1 = 3,
-    Q5_0 = 4,
-    Q5_1 = 5,
-    Q8_0 = 6,
-    Q8_1 = 7,
-    Q2K = 8,
-    Q3K = 9,
-    Q4K = 10,
-    Q5K = 11,
-    Q6K = 12,
-    Q8K = 13,
-    I8 = 14,
-    I16 = 15,
-    I32 = 16,
-    F64 = 17,
-    Iq2Xxs = 18,
-    Iq2Xs = 19,
-    Iq3Xxs = 20,
-    Iq1S = 21,
-    Iq4Nl = 22,
-    Iq3S = 23,
-    Iq2S = 24,
-    Iq4Xs = 25,
-    I64 = 26,
-    Iq1M = 27,
-    Bf16 = 28,
-    Tq1_0 = 29,
-    Tq2_0 = 30,
-    Count = 31,
+    Q5_0 = 6,
+    Q5_1 = 7,
+    Q8_0 = 8,
+    Q8_1 = 9,
+    Q2K = 10,
+    Q3K = 11,
+    Q4K = 12,
+    Q5K = 13,
+    Q6K = 14,
+    Q8K = 15,
+    Iq2Xxs = 16,
+    Iq2Xs = 17,
+    Iq3Xxs = 18,
+    Iq1S = 19,
+    Iq4Nl = 20,
+    Iq3S = 21,
+    Iq2S = 22,
+    Iq4Xs = 23,
+    I8 = 24,
+    I16 = 25,
+    I32 = 26,
+    I64 = 27,
+    F64 = 28,
+    Iq1M = 29,
+    Bf16 = 30,
+    Tq1_0 = 34,
+    Tq2_0 = 35,
+    Mxfp4 = 39,
+    Nvfp4 = 40,
+    Q1_0 = 41,
+    Q2_0 = 42,
+    F8E4M3 = 43,
+    Count = 44,
 }
 
 impl GgmlType {
@@ -204,6 +209,11 @@ impl GgmlType {
             GgmlType::Bf16 => 2,
             GgmlType::Tq1_0 => 32,
             GgmlType::Tq2_0 => 64,
+            GgmlType::Mxfp4 => 17,
+            GgmlType::Nvfp4 => 36,
+            GgmlType::Q1_0 => 18,
+            GgmlType::Q2_0 => 18,
+            GgmlType::F8E4M3 => 1,
             GgmlType::Count => 0,
         }
     }
@@ -218,9 +228,12 @@ impl GgmlType {
             | GgmlType::I32
             | GgmlType::F64
             | GgmlType::I64
-            | GgmlType::Bf16 => 1,
+            | GgmlType::Bf16
+            | GgmlType::F8E4M3 => 1,
             GgmlType::Q4_0 | GgmlType::Q4_1 | GgmlType::Q5_0 | GgmlType::Q5_1
-            | GgmlType::Q8_0 | GgmlType::Q8_1 | GgmlType::Iq4Nl => 32,
+            | GgmlType::Q8_0 | GgmlType::Q8_1 | GgmlType::Iq4Nl | GgmlType::Mxfp4 => 32,
+            GgmlType::Nvfp4 | GgmlType::Q2_0 => 64,
+            GgmlType::Q1_0 => 128,
             GgmlType::Q2K
             | GgmlType::Q3K
             | GgmlType::Q4K
@@ -274,6 +287,11 @@ impl GgmlType {
             GgmlType::Bf16 => "bf16",
             GgmlType::Tq1_0 => "tq1_0",
             GgmlType::Tq2_0 => "tq2_0",
+            GgmlType::Mxfp4 => "mxfp4",
+            GgmlType::Nvfp4 => "nvfp4",
+            GgmlType::Q1_0 => "q1_0",
+            GgmlType::Q2_0 => "q2_0",
+            GgmlType::F8E4M3 => "f8_e4m3",
             GgmlType::Count => "unknown",
         }
     }
@@ -283,50 +301,52 @@ impl TryFrom<i32> for GgmlType {
     type Error = Error;
 
     fn try_from(value: i32) -> std::result::Result<Self, Self::Error> {
-        if value < 0 || value >= GGML_TYPE_COUNT as i32 {
-            return Err(Error::new(format!(
-                "invalid ggml type {} (must be in [0, {}))",
-                value, GGML_TYPE_COUNT
-            )));
-        }
-        // All values in range have a variant with the same discriminant.
-        Ok(ALL_GGML_TYPES[value as usize])
+        let ty = match value {
+            0 => GgmlType::F32,
+            1 => GgmlType::F16,
+            2 => GgmlType::Q4_0,
+            3 => GgmlType::Q4_1,
+            6 => GgmlType::Q5_0,
+            7 => GgmlType::Q5_1,
+            8 => GgmlType::Q8_0,
+            9 => GgmlType::Q8_1,
+            10 => GgmlType::Q2K,
+            11 => GgmlType::Q3K,
+            12 => GgmlType::Q4K,
+            13 => GgmlType::Q5K,
+            14 => GgmlType::Q6K,
+            15 => GgmlType::Q8K,
+            16 => GgmlType::Iq2Xxs,
+            17 => GgmlType::Iq2Xs,
+            18 => GgmlType::Iq3Xxs,
+            19 => GgmlType::Iq1S,
+            20 => GgmlType::Iq4Nl,
+            21 => GgmlType::Iq3S,
+            22 => GgmlType::Iq2S,
+            23 => GgmlType::Iq4Xs,
+            24 => GgmlType::I8,
+            25 => GgmlType::I16,
+            26 => GgmlType::I32,
+            27 => GgmlType::I64,
+            28 => GgmlType::F64,
+            29 => GgmlType::Iq1M,
+            30 => GgmlType::Bf16,
+            34 => GgmlType::Tq1_0,
+            35 => GgmlType::Tq2_0,
+            39 => GgmlType::Mxfp4,
+            40 => GgmlType::Nvfp4,
+            41 => GgmlType::Q1_0,
+            42 => GgmlType::Q2_0,
+            43 => GgmlType::F8E4M3,
+            _ => {
+                return Err(Error::new(format!(
+                    "invalid ggml type {value} (removed or out of range)"
+                )));
+            }
+        };
+        Ok(ty)
     }
 }
-
-const ALL_GGML_TYPES: [GgmlType; GGML_TYPE_COUNT] = [
-    GgmlType::F32,
-    GgmlType::F16,
-    GgmlType::Q4_0,
-    GgmlType::Q4_1,
-    GgmlType::Q5_0,
-    GgmlType::Q5_1,
-    GgmlType::Q8_0,
-    GgmlType::Q8_1,
-    GgmlType::Q2K,
-    GgmlType::Q3K,
-    GgmlType::Q4K,
-    GgmlType::Q5K,
-    GgmlType::Q6K,
-    GgmlType::Q8K,
-    GgmlType::I8,
-    GgmlType::I16,
-    GgmlType::I32,
-    GgmlType::F64,
-    GgmlType::Iq2Xxs,
-    GgmlType::Iq2Xs,
-    GgmlType::Iq3Xxs,
-    GgmlType::Iq1S,
-    GgmlType::Iq4Nl,
-    GgmlType::Iq3S,
-    GgmlType::Iq2S,
-    GgmlType::Iq4Xs,
-    GgmlType::I64,
-    GgmlType::Iq1M,
-    GgmlType::Bf16,
-    GgmlType::Tq1_0,
-    GgmlType::Tq2_0,
-];
 
 pub fn ggml_type_size(ty: GgmlType) -> usize {
     ty.type_size()
