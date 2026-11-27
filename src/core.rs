@@ -43,7 +43,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 /// `canonical_f32` mirror `std::generate_canonical<double, 53>` and
 /// `std::generate_canonical<float, 24>` closely enough for a dry port; exact
 /// bit-for-bit parity with libstdc++ distributions is not verified.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Mt19937 {
     state: [u32; 624],
     index: usize,
