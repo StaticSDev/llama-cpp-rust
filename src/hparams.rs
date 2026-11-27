@@ -1223,10 +1223,10 @@ mod tests {
         p.set_swa_pattern(3, false);
         p.set_recr_pattern(2, true);
 
-        // n_pattern = 3, dense_first = false: every third layer is dense
-        assert!(!p.is_swa(0).unwrap());
-        assert!(!p.is_swa(1).unwrap());
-        assert!(p.is_swa(2).unwrap());
+        // n_pattern = 3, dense_first = false: layer 2 is dense, 0 and 1 are SWA
+        assert!(p.is_swa(0).unwrap());
+        assert!(p.is_swa(1).unwrap());
+        assert!(!p.is_swa(2).unwrap());
         assert!(p.is_swa_any());
         // layers after n_layer() are never SWA
         assert!(!p.is_swa(5).unwrap());
