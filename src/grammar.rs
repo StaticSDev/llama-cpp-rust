@@ -1220,7 +1220,7 @@ fn match_token(rules: &[GrammarRule], pos: GrammarPos, token: Token) -> (bool, G
 }
 
 // every token id a token rule names, merged into sorted inclusive ranges
-fn opaque_tokens(rules: &GrammarRules) -> Vec<(u32, u32)> {
+fn opaque_tokens(rules: &[GrammarRule]) -> Vec<(u32, u32)> {
     let mut ranges = Vec::new();
     for rule in rules {
         for (i, elem) in rule.iter().enumerate() {
@@ -1257,7 +1257,7 @@ fn opaque_tokens(rules: &GrammarRules) -> Vec<(u32, u32)> {
 
 // transforms a grammar pushdown stack into N possible stacks, all ending
 // at a character range (terminal element)
-fn advance_stack(rules: &GrammarRules, stack: &GrammarStack, new_stacks: &mut GrammarStacks) {
+fn advance_stack(rules: &[GrammarRule], stack: &GrammarStack, new_stacks: &mut GrammarStacks) {
     let mut todo = vec![stack.clone()];
     let mut seen: BTreeSet<GrammarStack> = BTreeSet::new();
 
@@ -1323,7 +1323,7 @@ fn advance_stack(rules: &GrammarRules, stack: &GrammarStack, new_stacks: &mut Gr
 }
 
 fn accept_chr(
-    rules: &GrammarRules,
+    rules: &[GrammarRule],
     stack: &GrammarStack,
     chr: u32,
     new_stacks: &mut GrammarStacks,
@@ -1662,7 +1662,7 @@ fn left_factor(rules: &mut GrammarRules) {
 }
 
 fn detect_left_recursion(
-    rules: &GrammarRules,
+    rules: &[GrammarRule],
     rule_index: usize,
     rules_visited: &mut [bool],
     rules_in_progress: &mut [bool],
