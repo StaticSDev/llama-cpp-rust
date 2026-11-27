@@ -283,7 +283,7 @@ fn match_partial_char(rules: &[GrammarRule], pos: GrammarPos, partial_utf8: Part
     // range of possible code points this partial UTF-8 sequence could complete to
     let shift = (n_remain * 6) as u32;
     let mut low = partial_value.wrapping_shl(shift);
-    let mut high = low | 1u32.wrapping_shl(shift).wrapping_sub(1);
+    let high = low | 1u32.wrapping_shl(shift).wrapping_sub(1);
 
     if low == 0 {
         if n_remain == 2 {
@@ -656,6 +656,7 @@ pub struct Grammar {
     stacks: GrammarStacks,
     // buffer for partially generated UTF-8 sequence from accepted tokens
     partial_utf8: PartialUtf8,
+    #[allow(dead_code)] // kept for fidelity with the C++ grammar struct
     lazy: bool,
     awaiting_trigger: bool, // initialized to true for lazy grammars only
     trigger_buffer: Vec<u8>,
