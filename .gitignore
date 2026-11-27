@@ -2,3 +2,6 @@
 /reference/
 /models/
 Cargo.lock
+
+__pycache__/
+*.pyc
