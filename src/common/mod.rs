@@ -23,6 +23,17 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+pub mod arg;
+pub mod chat_parser;
+pub mod console;
+pub mod download;
+pub mod jinja;
+pub mod json_schema;
+pub mod misc;
+pub mod ngram;
+pub mod sampling;
+pub mod speculative;
+
 // ---------------------------------------------------------------------------
 // constants
 // ---------------------------------------------------------------------------
