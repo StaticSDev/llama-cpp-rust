@@ -172,6 +172,7 @@ pub fn mk_object() -> Value {
     }))
 }
 
+#[allow(dead_code)]
 pub fn mk_object_from(pairs: Vec<(Value, Value)>) -> Value {
     let obj = mk_object();
     for (k, v) in pairs {
@@ -484,6 +485,7 @@ pub fn at(v: &Value, key: &Value, default: Option<Value>) -> JResult<Option<Valu
 }
 
 /// `at(key)` without a default: missing keys are an error.
+#[allow(dead_code)]
 pub fn at_required(v: &Value, key: &Value) -> JResult<Value> {
     match at(v, key, None)? {
         Some(val) => Ok(val),
@@ -2971,6 +2973,7 @@ pub fn global_from_json(ctx: &mut Context, json_obj: &Json, mark_input: bool) ->
 }
 
 /// Internal helper kept for callers that need the sorted-name view.
+#[allow(dead_code)]
 pub fn global_builtin_names() -> &'static [&'static str] {
     NAMES
 }
