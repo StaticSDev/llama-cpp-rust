@@ -507,7 +507,14 @@ fn to_api_gtype(t: crate::gguf::GgmlType) -> api::GgmlType {
         G::Bf16 => api::GgmlType::Bf16,
         G::Tq1_0 => api::GgmlType::Tq1_0,
         G::Tq2_0 => api::GgmlType::Tq2_0,
-        G::Q5_0 | G::Q5_1 | G::Count => api::GgmlType::F16,
+        G::Q5_0
+        | G::Q5_1
+        | G::Mxfp4
+        | G::Nvfp4
+        | G::Q1_0
+        | G::Q2_0
+        | G::F8E4M3
+        | G::Count => api::GgmlType::F16,
     }
 }
 
