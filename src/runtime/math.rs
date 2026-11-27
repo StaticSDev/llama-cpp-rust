@@ -123,14 +123,56 @@ pub fn matvec(data: &[u8], w: &Weight, x: &[f32], out: &mut [f32]) -> Result<()>
     if x.len() != w.in_features() || out.len() != w.out_features() {
         return Err(Error::new("matvec shape mismatch"));
     }
+
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    if threads < 2 || out.len() < 512 {
+        return matvec_range(data, w, x, out, 0, out.len());
+    }
+
+    // Rows are independent: split the output and dequantize each row in its
+    // own worker. This keeps the whole model resident as quantized bytes.
+    let chunk = (out.len() + threads - 1) / threads;
+    let mut errors = Vec::new();
+    std::thread::scope(|scope| {
+        let mut handles = Vec::with_capacity(threads);
+        for (i, part) in out.chunks_mut(chunk).enumerate() {
+            let start = i * chunk;
+            handles.push(scope.spawn(move || {
+                matvec_range(data, w, x, part, start, start + part.len())
+            }));
+        }
+        for handle in handles {
+            match handle.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => errors.push(err),
+                Err(_) => errors.push(Error::new("matvec worker panicked")),
+            }
+        }
+    });
+    match errors.into_iter().next() {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+fn matvec_range(
+    data: &[u8],
+    w: &Weight,
+    x: &[f32],
+    out: &mut [f32],
+    first: usize,
+    last: usize,
+) -> Result<()> {
     let mut row = vec![0.0f32; w.in_features()];
-    for r in 0..w.out_features() {
+    for r in first..last.min(w.out_features()) {
         dequant_row(w.ty, w.row(data, r)?, &mut row)?;
         let mut sum = 0.0f32;
         for (a, b) in row.iter().zip(x.iter()) {
             sum += a * b;
         }
-        out[r] = sum;
+        out[r - first] = sum;
     }
     Ok(())
 }

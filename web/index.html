@@ -4,34 +4,79 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="color-scheme" content="dark">
-  <title>Qwen3.5 · Local</title>
+  <title>Local inference</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="app">
-    <header class="topbar">
-      <span class="model" id="model">Qwen3.5 <span class="sep">·</span> Local</span>
-      <span class="status" aria-live="polite">
-        <span class="dot" id="dot" aria-hidden="true"></span>
-        <span class="status-text" id="status-text">Loading</span>
-      </span>
-    </header>
-
-    <main class="messages" id="messages" role="log" aria-label="Conversation" aria-live="polite">
-      <section class="empty" id="empty">
-        <p class="empty-title">Start a conversation.</p>
-        <p class="empty-hint">Ask a question to begin.</p>
-      </section>
-    </main>
-
-    <form class="composer" id="composer" autocomplete="off">
-      <label class="sr-only" for="prompt">Message</label>
-      <textarea id="prompt" name="prompt" rows="1" placeholder="Ask anything…"></textarea>
-      <div class="composer-foot">
-        <span class="hint">Enter to send · Shift+Enter for newline</span>
-        <button type="submit" id="send">Send</button>
+  <div class="shell">
+    <aside class="rail">
+      <div class="wordmark">
+        <span class="wordmark-title">Local inference</span>
+        <span class="wordmark-sub" id="model">Qwen3.5 4B</span>
       </div>
-    </form>
+
+      <div class="rail-block">
+        <h2 class="rail-label">Session</h2>
+        <dl class="readouts">
+          <div><dt>Prompt</dt><dd id="m-prompt">—</dd></div>
+          <div><dt>Generated</dt><dd id="m-gen">—</dd></div>
+          <div><dt>Prefill</dt><dd id="m-prefill">—</dd></div>
+          <div><dt>Decode</dt><dd id="m-decode">—</dd></div>
+        </dl>
+      </div>
+
+      <div class="rail-foot">
+        <span class="dot" id="dot" aria-hidden="true"></span>
+        <span id="status-text">Loading</span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="head">
+        <span>Conversation</span>
+        <span class="head-note" id="head-note">Nothing running</span>
+      </header>
+
+      <div class="messages" id="messages" role="log" aria-label="Conversation" aria-live="polite">
+        <section class="empty" id="empty">
+          <p class="empty-title">Ask something.</p>
+          <p class="empty-hint">The model runs on this machine. Answers take a while.</p>
+        </section>
+      </div>
+
+      <footer class="dock">
+        <section class="telemetry" aria-label="Generation telemetry">
+          <div class="trace"><i id="trace-fill"></i></div>
+          <div class="cells">
+            <div class="cell">
+              <span class="cell-label">Prompt</span>
+              <strong id="t-prompt">0 tok</strong>
+            </div>
+            <div class="cell">
+              <span class="cell-label">Generated</span>
+              <strong id="t-gen">0 tok</strong>
+            </div>
+            <div class="cell">
+              <span class="cell-label">Speed</span>
+              <strong id="t-speed">— tok/s</strong>
+            </div>
+            <div class="cell">
+              <span class="cell-label">Elapsed</span>
+              <strong id="t-elapsed">0.0s</strong>
+            </div>
+          </div>
+        </section>
+
+        <form class="composer" id="composer" autocomplete="off">
+          <label class="sr-only" for="prompt">Message</label>
+          <textarea id="prompt" name="prompt" rows="1" placeholder="Ask anything…"></textarea>
+          <div class="composer-foot">
+            <span class="hint">Enter to send · Shift+Enter for newline</span>
+            <button type="submit" id="send">Send</button>
+          </div>
+        </form>
+      </footer>
+    </main>
   </div>
 
   <script src="app.js"></script>
