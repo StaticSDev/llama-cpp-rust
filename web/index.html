@@ -8,37 +8,44 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <div class="shell">
-    <aside class="rail">
-      <div class="wordmark">
-        <span class="wordmark-title">Local inference</span>
-        <span class="wordmark-sub" id="model">Qwen3.5 4B</span>
+  <div class="shell" id="shell">
+    <div class="scrim" id="scrim"></div>
+
+    <aside class="sidebar" id="sidebar" aria-label="Chats">
+      <div class="brand">
+        <span class="mark-box" aria-hidden="true"><span class="mark"></span></span>
+        <span class="brand-name">Local inference</span>
       </div>
 
-      <div class="rail-block">
-        <h2 class="rail-label">Session</h2>
-        <dl class="readouts">
-          <div><dt>Prompt</dt><dd id="m-prompt">—</dd></div>
-          <div><dt>Generated</dt><dd id="m-gen">—</dd></div>
-          <div><dt>Prefill</dt><dd id="m-prefill">—</dd></div>
-          <div><dt>Decode</dt><dd id="m-decode">—</dd></div>
-        </dl>
-      </div>
+      <button class="new-chat" id="new-chat" type="button">
+        <span class="plus" aria-hidden="true"></span>
+        <span>New chat</span>
+      </button>
 
-      <div class="rail-foot">
-        <span class="dot" id="dot" aria-hidden="true"></span>
-        <span id="status-text">Loading</span>
+      <div class="chat-list" id="chat-list"></div>
+
+      <div class="device">
+        <div class="device-head">
+          <span class="status-square" id="device-square" aria-hidden="true"></span>
+          <span class="device-name mono" id="model" title="—">—</span>
+        </div>
+        <div class="device-status mono" id="status-text">Loading</div>
+        <div class="device-gpu mono" id="gpu" hidden></div>
       </div>
     </aside>
 
     <main class="main">
       <header class="head">
-        <span>Conversation</span>
-        <span class="head-note" id="head-note">Nothing running</span>
+        <button class="drawer-toggle" id="drawer-toggle" type="button" aria-label="Open chats" aria-expanded="false" aria-controls="sidebar">
+          <i></i><i></i><i></i>
+        </button>
+        <span class="head-title" id="head-title">New chat</span>
+        <span class="head-note mono" id="head-note">Idle</span>
       </header>
 
       <div class="messages" id="messages" role="log" aria-label="Conversation" aria-live="polite">
         <section class="empty" id="empty">
+          <div class="empty-glyph" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
           <p class="empty-title">Ask something.</p>
           <p class="empty-hint">The model runs on this machine. Answers take a while.</p>
         </section>
@@ -46,33 +53,26 @@
 
       <footer class="dock">
         <section class="telemetry" aria-label="Generation telemetry">
-          <div class="trace"><i id="trace-fill"></i></div>
-          <div class="cells">
-            <div class="cell">
-              <span class="cell-label">Prompt</span>
-              <strong id="t-prompt">0 tok</strong>
-            </div>
-            <div class="cell">
-              <span class="cell-label">Generated</span>
-              <strong id="t-gen">0 tok</strong>
-            </div>
-            <div class="cell">
-              <span class="cell-label">Speed</span>
-              <strong id="t-speed">— tok/s</strong>
-            </div>
-            <div class="cell">
-              <span class="cell-label">Elapsed</span>
-              <strong id="t-elapsed">0.0s</strong>
-            </div>
+          <div class="telemetry-top">
+            <span class="tag mono">Prefill</span>
+            <div class="segments" id="segments" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+            <span class="prefill-count mono" id="t-prefill">0 / 0 tok</span>
           </div>
+          <div class="cells">
+            <div class="cell"><span class="cell-label mono">Generated</span><strong class="cell-value mono" id="t-gen">0 tok</strong></div>
+            <div class="cell"><span class="cell-label mono">Speed</span><strong class="cell-value mono" id="t-speed">— tok/s</strong></div>
+            <div class="cell"><span class="cell-label mono">Elapsed</span><strong class="cell-value mono" id="t-elapsed">0.0s</strong></div>
+            <div class="cell"><span class="cell-label mono">State</span><strong class="cell-value mono" id="t-state">Idle</strong></div>
+          </div>
+          <div class="final mono" id="t-final" hidden></div>
         </section>
 
         <form class="composer" id="composer" autocomplete="off">
           <label class="sr-only" for="prompt">Message</label>
           <textarea id="prompt" name="prompt" rows="1" placeholder="Ask anything…"></textarea>
           <div class="composer-foot">
-            <span class="hint">Enter to send · Shift+Enter for newline</span>
-            <button type="submit" id="send">Send</button>
+            <span class="hint mono">Enter to send · Shift+Enter for newline</span>
+            <button type="submit" id="send" class="send" disabled>Send</button>
           </div>
         </form>
       </footer>
