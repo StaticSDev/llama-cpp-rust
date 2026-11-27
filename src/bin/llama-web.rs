@@ -57,9 +57,13 @@ fn run() -> std::result::Result<(), String> {
     }
     .map_err(|e| e.to_string())?;
     #[cfg(feature = "cuda")]
+    let gpu = weights.gpu().map(|g| g.info()).unwrap_or_default();
+    #[cfg(not(feature = "cuda"))]
+    let gpu = String::new();
+    #[cfg(feature = "cuda")]
     {
-        if let Some(g) = weights.gpu() {
-            println!("{}", g.info());
+        if !gpu.is_empty() {
+            println!("{gpu}");
         }
     }
     let listener =
@@ -68,7 +72,7 @@ fn run() -> std::result::Result<(), String> {
         "http://{}/",
         listener.local_addr().map_err(|e| e.to_string())?
     );
-    server::serve(listener, weights, model);
+    server::serve(listener, weights, model, gpu);
     Ok(())
 }
 

@@ -18,11 +18,11 @@ const MAX_TOKENS: usize = 512;
 ///
 /// One connection at a time: generation builds its own model state, so a
 /// shared `&Weights` needs no lock and no `Send + Sync` bound.
-pub fn serve(listener: TcpListener, weights: Weights, model_path: String) {
+pub fn serve(listener: TcpListener, weights: Weights, model_path: String, gpu: String) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
-                if let Err(err) = handle(&stream, &weights, &model_path) {
+                if let Err(err) = handle(&stream, &weights, &model_path, &gpu) {
                     if !matches!(
                         err.kind(),
                         io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
@@ -36,7 +36,12 @@ pub fn serve(listener: TcpListener, weights: Weights, model_path: String) {
     }
 }
 
-fn handle(stream: &TcpStream, weights: &Weights, model_path: &str) -> io::Result<()> {
+fn handle(
+    stream: &TcpStream,
+    weights: &Weights,
+    model_path: &str,
+    gpu: &str,
+) -> io::Result<()> {
     stream.set_read_timeout(Some(Duration::from_secs(15)))?;
     let mut reader = BufReader::new(stream);
 
@@ -92,6 +97,7 @@ fn handle(stream: &TcpStream, weights: &Weights, model_path: &str) -> io::Result
             let json = Json::object_from(vec![
                 Item::new("model", model_path),
                 Item::new("ready", true),
+                Item::new("gpu", gpu),
             ]);
             respond_json(stream, "200 OK", &json)
         }
