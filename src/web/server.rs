@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::json::{Item, Json};
-use crate::runtime::generate::generate;
+use crate::runtime::generate::{generate_stream, Event, Stats};
 use crate::runtime::types::Weights;
 
 const MAX_HEADERS: usize = 8 * 1024;
@@ -95,12 +95,13 @@ fn handle(stream: &TcpStream, weights: &Weights, model_path: &str) -> io::Result
             ]);
             respond_json(stream, "200 OK", &json)
         }
-        ("POST", "/api/chat") => chat(stream, weights, &body),
+        ("POST", "/api/chat") => chat(stream, weights, &body, false),
+        ("POST", "/api/chat/stream") => chat(stream, weights, &body, true),
         _ => respond(stream, "404 Not Found", "text/plain; charset=utf-8", b"Not Found\n"),
     }
 }
 
-fn chat(stream: &TcpStream, weights: &Weights, body: &[u8]) -> io::Result<()> {
+fn chat(stream: &TcpStream, weights: &Weights, body: &[u8], streaming: bool) -> io::Result<()> {
     let text = String::from_utf8_lossy(body);
     let json = match Json::parse(&text) {
         Ok(json) => json,
@@ -136,13 +137,89 @@ fn chat(stream: &TcpStream, weights: &Weights, body: &[u8]) -> io::Result<()> {
         return json_error(stream, "400 Bad Request", "temp and top_p must be finite");
     }
 
-    match generate(weights, &prompt, n as usize, temp, top_p) {
-        Ok(text) => {
-            let json = Json::object_from(vec![Item::new("text", text)]);
-            respond_json(stream, "200 OK", &json)
-        }
-        Err(err) => json_error(stream, "500 Internal Server Error", &err.to_string()),
+    if !streaming {
+        return match generate_stream(weights, &prompt, n as usize, temp, top_p, |_| {}) {
+            Ok((text, _)) => {
+                let json = Json::object_from(vec![Item::new("text", text)]);
+                respond_json(stream, "200 OK", &json)
+            }
+            Err(err) => json_error(stream, "500 Internal Server Error", &err.to_string()),
+        };
     }
+
+    // Close-delimited NDJSON: one JSON object per line, flushed as it happens.
+    // A failed write is remembered, not retried; generation still runs to the
+    // end because the callback cannot unwind the sampler.
+    let mut write_err: Option<io::Error> = None;
+    let mut write = |data: &str| {
+        if write_err.is_some() {
+            return;
+        }
+        if let Err(err) = write_raw(stream, data.as_bytes()) {
+            write_err = Some(err);
+        }
+    };
+
+    let mut started = false;
+    let result = generate_stream(weights, &prompt, n as usize, temp, top_p, |event| {
+        if !started {
+            started = true;
+            write(NDJSON_HEAD);
+        }
+        let line = match event {
+            Event::Prompt { done, total } => Json::object_from(vec![
+                Item::new("type", "prompt"),
+                Item::new("done", done),
+                Item::new("total", total),
+            ])
+            .dump_safe(-1),
+            Event::Token(text) => {
+                Json::object_from(vec![Item::new("type", "token"), Item::new("text", text)])
+                    .dump_safe(-1)
+            }
+        };
+        write(&(line + "\n"));
+    });
+
+    if !started {
+        write(NDJSON_HEAD);
+    }
+    match result {
+        Ok((_, stats)) => write(&(stats_line(&stats) + "\n")),
+        Err(err) => {
+            let line = Json::object_from(vec![
+                Item::new("type", "error"),
+                Item::new("error", err.to_string()),
+            ])
+            .dump_safe(-1);
+            write(&(line + "\n"));
+        }
+    }
+    match write_err {
+        Some(err) => Err(err),
+        None => Ok(()),
+    }
+}
+
+const NDJSON_HEAD: &str = "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n";
+
+fn write_raw(stream: &TcpStream, bytes: &[u8]) -> io::Result<()> {
+    let mut stream = stream;
+    stream.write_all(bytes)?;
+    stream.flush()
+}
+
+fn stats_line(stats: &Stats) -> String {
+    Json::object_from(vec![
+        Item::new("type", "done"),
+        Item::new("prompt_tokens", stats.prompt_tokens),
+        Item::new("prompt_ms", stats.prompt_ms as u64),
+        Item::new("prompt_tok_s", stats.prompt_tokens_per_sec()),
+        Item::new("tokens", stats.tokens),
+        Item::new("gen_ms", stats.gen_ms as u64),
+        Item::new("tok_s", stats.tokens_per_sec()),
+    ])
+    .dump_safe(-1)
 }
 
 fn serve_file(stream: &TcpStream, name: &str, content_type: &str) -> io::Result<()> {

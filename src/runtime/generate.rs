@@ -1,6 +1,6 @@
 //! Greedy and top-p text generation on the small CPU runtime.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::core::{Error, Mt19937, Result, Token};
 use crate::runtime::qwen35;
@@ -14,6 +14,40 @@ fn forward_logits(w: &Weights, st: &mut ModelState, tok: Token) -> Result<Vec<f3
     Ok(logits)
 }
 
+/// Counters collected during one generation run.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Stats {
+    pub prompt_tokens: usize,
+    pub prompt_ms: u128,
+    pub tokens: usize,
+    pub gen_ms: u128,
+}
+
+impl Stats {
+    pub fn prompt_tokens_per_sec(&self) -> f32 {
+        per_sec(self.prompt_tokens, self.prompt_ms)
+    }
+
+    pub fn tokens_per_sec(&self) -> f32 {
+        per_sec(self.tokens, self.gen_ms)
+    }
+}
+
+fn per_sec(count: usize, ms: u128) -> f32 {
+    if ms == 0 {
+        return 0.0;
+    }
+    count as f32 * 1000.0 / ms as f32
+}
+
+/// Progress reported while a turn is being generated.
+pub enum Event<'a> {
+    /// Prompt token `done` of `total` has been processed.
+    Prompt { done: usize, total: usize },
+    /// A piece of generated text.
+    Token(&'a str),
+}
+
 /// Run one Qwen chat turn and return the generated text (without chat tags).
 pub fn generate(
     w: &Weights,
@@ -22,19 +56,38 @@ pub fn generate(
     temp: f32,
     top_p: f32,
 ) -> Result<String> {
+    generate_stream(w, prompt, n_predict, temp, top_p, |_| {}).map(|(text, _)| text)
+}
+
+/// Same as [`generate`], reporting progress through `on_event` and returning
+/// token counts plus timings.
+pub fn generate_stream<F: FnMut(Event)>(
+    w: &Weights,
+    prompt: &str,
+    n_predict: usize,
+    temp: f32,
+    top_p: f32,
+    mut on_event: F,
+) -> Result<(String, Stats)> {
     let formatted = format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
     let prompt_tokens = w.vocab.tokenize(&formatted, true, true);
     let mut st = ModelState::new(w);
+    let mut stats = Stats::default();
 
+    let prompt_start = Instant::now();
     let mut logits = if prompt_tokens.is_empty() {
         forward_logits(w, &mut st, w.vocab.token_bos())?
     } else {
+        let total = prompt_tokens.len();
         let mut last = Vec::new();
-        for &tok in &prompt_tokens {
+        for (i, &tok) in prompt_tokens.iter().enumerate() {
             last = forward_logits(w, &mut st, tok)?;
+            on_event(Event::Prompt { done: i + 1, total });
         }
         last
     };
+    stats.prompt_tokens = prompt_tokens.len().max(1);
+    stats.prompt_ms = prompt_start.elapsed().as_millis();
 
     let seed = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -44,6 +97,7 @@ pub fn generate(
     let eos = w.vocab.token_eos();
     let eot = w.vocab.token_eot();
     let mut out = String::new();
+    let gen_start = Instant::now();
 
     for _ in 0..n_predict {
         let tok = if temp <= 0.0 {
@@ -59,13 +113,20 @@ pub fn generate(
         let id = tok as usize;
         if id < w.vocab.n_tokens() as usize && !w.vocab.is_control(tok) && !w.vocab.is_unknown(tok)
         {
-            out.push_str(w.vocab.token_to_piece_cached(tok));
+            let piece = w.vocab.token_to_piece_cached(tok);
+            if !piece.is_empty() {
+                out.push_str(piece);
+                on_event(Event::Token(piece));
+            }
         }
 
+        stats.tokens += 1;
+        stats.gen_ms = gen_start.elapsed().as_millis();
         logits = forward_logits(w, &mut st, tok)?;
     }
 
-    Ok(out)
+    stats.gen_ms = gen_start.elapsed().as_millis();
+    Ok((out, stats))
 }
 
 fn greedy(logits: &[f32]) -> Token {
@@ -119,4 +180,28 @@ fn sample_top_p(logits: &[f32], temp: f32, top_p: f32, rng: &mut Mt19937) -> Tok
         }
     }
     last
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stats_rate_handles_zero_time() {
+        let stats = Stats::default();
+        assert_eq!(stats.tokens_per_sec(), 0.0);
+        assert_eq!(stats.prompt_tokens_per_sec(), 0.0);
+    }
+
+    #[test]
+    fn stats_rate_is_tokens_over_seconds() {
+        let stats = Stats {
+            prompt_tokens: 20,
+            prompt_ms: 2_000,
+            tokens: 10,
+            gen_ms: 500,
+        };
+        assert!((stats.prompt_tokens_per_sec() - 10.0).abs() < 1e-4);
+        assert!((stats.tokens_per_sec() - 20.0).abs() < 1e-4);
+    }
 }
