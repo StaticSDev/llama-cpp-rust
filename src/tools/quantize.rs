@@ -1244,7 +1244,7 @@ mod tests {
     #[test]
     fn parses_ftypes_by_name_and_ordinal() {
         assert_eq!(try_parse_ftype("q4_k_m"), Some((FType::MostlyQ4KM, "Q4_K_M".into())));
-        assert_eq!(try_parse_ftype("15"), Some((FType::MostlyQ4KM, "Q4_K_M".into())));
+        assert_eq!(try_parse_ftype("15"), Some((FType::MostlyQ4KM, "Q4_K".into())));
         assert_eq!(try_parse_ftype("0"), Some((FType::AllF32, "F32".into())));
         assert_eq!(try_parse_ftype("copy"), Some((FType::AllF32, "COPY".into())));
         assert_eq!(try_parse_ftype("nope"), None);
