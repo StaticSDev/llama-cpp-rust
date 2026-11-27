@@ -823,7 +823,7 @@ impl IndexMut<&str> for Json {
         if !self.contains(key) {
             self.obj_set(key.to_string(), Json::Null).expect("json operator[] failed");
         }
-        self.at(key).expect("json key not found")
+        self.at_mut(key).expect("json key not found")
     }
 }
 
@@ -867,7 +867,7 @@ macro_rules! impl_from_json_num {
             impl FromJson for $ty {
                 fn from_json(json: &Json) -> Result<Self> {
                     match json {
-                        Json::Bool(v) => Ok(*v as $ty),
+                        Json::Bool(v) => Ok(u8::from(*v) as $ty),
                         Json::Int(v) => Ok(*v as $ty),
                         Json::UInt(v) => Ok(*v as $ty),
                         Json::Double(v) => Ok(*v as $ty),
