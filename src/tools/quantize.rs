@@ -21,7 +21,7 @@ use crate::gguf::{
 };
 use crate::quant::{
     llama_model_quantize, llama_model_quantize_default_params, FType, ImatrixData, KvOverride,
-    KvOverrideType, QType, QuantizeParams, TensorTypeOverride,
+    KvOverrideType, QType, TensorTypeOverride,
 };
 
 // ---------------------------------------------------------------------------
@@ -384,7 +384,7 @@ fn read_i32(data: &[u8], pos: &mut usize) -> Option<i32> {
     Some(i32::from_ne_bytes(buf))
 }
 
-fn read_bytes(data: &[u8], pos: &mut usize, n: usize) -> Option<&[u8]> {
+fn read_bytes<'a>(data: &'a [u8], pos: &mut usize, n: usize) -> Option<&'a [u8]> {
     let end = pos.checked_add(n)?;
     let slice = data.get(*pos..end)?;
     *pos = end;
