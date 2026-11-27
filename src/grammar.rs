@@ -1519,7 +1519,8 @@ pub fn reject_candidates_for_stack(
     stack: &GrammarStack,
     candidates: &[GrammarCandidate],
 ) -> GrammarCandidates {
-    reject_candidates(rules, &vec![stack.clone()], candidates)
+    let stacks = vec![stack.clone()];
+    reject_candidates(rules, &stacks, candidates)
 }
 
 // ---------------------------------------------------------------------------
