@@ -102,6 +102,7 @@ pub enum ChatTemplate {
     Bailing2,
     Llama4,
     Smolvlm,
+    Dots1,
     HunyuanMoe,
     OpenaiMoe,
     HunyuanDense,
@@ -1038,7 +1039,7 @@ pub fn chat_apply_template(tmpl_src: &str, chat: &[ChatMessage], dest: &mut Stri
 // Messages, tools and parsing helpers (common/chat.h / common/chat.cpp)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ChatToolCall {
     pub name: String,
     pub arguments: String,
@@ -1748,7 +1749,8 @@ pub fn strip_bos_eos(
         }
     }
     if add_eos && !prompt.parts.is_empty() {
-        let last = &mut prompt.parts[prompt.parts.len() - 1];
+        let last_idx = prompt.parts.len() - 1;
+        let last = &mut prompt.parts[last_idx];
         if !last.is_input && last.text.ends_with(eos_token) {
             last.text.truncate(last.text.len() - eos_token.len());
         }
