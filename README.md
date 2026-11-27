@@ -36,6 +36,21 @@ ignored by git. It is the translation reference, not part of this repository.
 - `src/<module>/mod.rs` - module declarations and re-exports.
 - `reference/` - local upstream checkout, gitignored.
 
+## Run a model
+
+A small CPU runtime for Qwen3.5 dense/hybrid GGUF lives in `src/runtime/`.
+Models are not committed; download one into `models/` first.
+
+```sh
+cargo build --release --bin llama-rs
+target/release/llama-rs \
+  --model models/Qwen3.5-4B-Q4_K_M.gguf \
+  --prompt "Hi, who are you?" -n 8 --temp 0
+```
+
+The runtime dequantizes one weight row at a time, so it is memory-safe but slow
+on CPU. Greedy (`--temp 0`) and temperature + top-p sampling are supported.
+
 ## License
 
 Original code: MIT, Copyright (c) 2023-2026 ggml authors. See `LICENSE`.
