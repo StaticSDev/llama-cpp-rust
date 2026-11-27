@@ -2,7 +2,7 @@
 
 use crate::core::{Error, Result, Token};
 
-fn string_diff(last: &str, current: &str) -> Result<String> {
+pub(crate) fn string_diff(last: &str, current: &str) -> Result<String> {
     if last.is_empty() {
         return Ok(current.to_owned());
     }

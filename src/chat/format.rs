@@ -15,7 +15,7 @@ use crate::core::{Error, LLAMA_TOKEN_NULL, Result, Token};
 // ---------------------------------------------------------------------------
 
 // trim whitespace from the beginning and end of a string
-fn trim(str: &str) -> String {
+pub(crate) fn trim(str: &str) -> String {
     str.trim_matches(|c: char| c.is_ascii_whitespace()).to_owned()
 }
 
