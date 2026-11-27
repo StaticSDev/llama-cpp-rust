@@ -3019,7 +3019,8 @@ mod tests {
         let mut mask2 = [false; GGML_MAX_N_THREADS];
         assert!(parse_cpu_mask("0x8000000000000001", &mut mask2));
         assert!(mask2[0] && mask2[63]);
-        assert!(parse_cpu_range("3", &mut mask2));
+        assert!(!parse_cpu_range("3", &mut mask2));
+        assert!(parse_cpu_range("3-", &mut mask2));
         assert!(mask2[3] && mask2[GGML_MAX_N_THREADS - 1]);
 
         let mut cp = CpuParams::default();
@@ -3189,7 +3190,7 @@ mod tests {
         assert_eq!(common_opt_get_optimizer("nope"), OptimizerType::Count);
 
         let dataset = common_opt_dataset_init(&[0, 1, 2, 3, 4], 2, 1).unwrap();
-        assert_eq!(dataset.data, vec![0, 1, 2]);
-        assert_eq!(dataset.labels, vec![1, 2, 3]);
+        assert_eq!(dataset.data, vec![0, 1, 1, 2]);
+        assert_eq!(dataset.labels, vec![1, 2, 2, 3]);
     }
 }
