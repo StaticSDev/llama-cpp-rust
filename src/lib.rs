@@ -32,3 +32,4 @@ pub mod sampler;
 pub mod tools;
 pub mod unicode;
 pub mod vocab;
+pub mod web;
