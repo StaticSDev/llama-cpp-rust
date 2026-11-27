@@ -62,7 +62,8 @@ target/release/llama-web \
   --port 8080
 ```
 
-Open `http://127.0.0.1:8080/`. The page calls `POST /api/chat`.
+Open `http://127.0.0.1:8080/`. The page streams `POST /api/chat/stream`
+(newline-delimited JSON) and shows prompt progress plus tokens per second.
 One request is processed at a time because generation is CPU-bound.
 
 ## License
