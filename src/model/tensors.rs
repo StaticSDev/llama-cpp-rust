@@ -6,7 +6,7 @@ use super::types::*;
 use super::LlamaModelLoader;
 use crate::arch::{Arch, LlmTn, LlmTnImpl, Tensor as ArchTensor};
 use crate::core::{Error, Result};
-use crate::gguf::{ggml_nbytes, GgmlType, GgufType};
+use crate::gguf::GgmlType;
 use crate::hparams::LLAMA_MAX_LAYERS;
 use std::collections::BTreeMap;
 
@@ -1172,7 +1172,7 @@ pub fn load_tensors(model: &mut LlamaModel, ml: &mut LlamaModelLoader) -> Result
     let mut by_buft: BTreeMap<String, usize> = BTreeMap::new();
     for (_, tensor) in &model.tensors_by_name {
         let name = tensor.buffer.clone().unwrap_or_else(|| "CPU".to_owned());
-        let buft = BufferType {
+        let _buft = BufferType {
             name: name.clone(),
             device: 0,
         };

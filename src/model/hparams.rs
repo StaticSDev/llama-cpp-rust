@@ -2,12 +2,12 @@
 //! naming helpers from `llama-model.cpp`.
 
 use super::model::LlamaModel;
-use super::types::{LlmType, RopeType};
+use super::types::RopeType;
 use super::LlamaModelLoader;
 use crate::arch::{arch_is_recurrent, Arch, Kv};
 use crate::core::{Error, Result};
 use crate::hparams::{
-    ExpertGatingFuncType, FfnOpType, Hparams, PoolingType, RopeScalingType, RopeSectionOrder,
+    ExpertGatingFuncType, Hparams, PoolingType, RopeScalingType, RopeSectionOrder,
     LLAMA_MAX_EXPERTS, LLAMA_MAX_LAYERS,
 };
 use crate::vocab::{VocabPreType, VocabType};

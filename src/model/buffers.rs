@@ -360,6 +360,7 @@ enum SplitKind {
     SsmBetaAlpha,
     SsmBetaAlphaCat,
     RCache,
+    #[allow(dead_code)] // kept for fidelity with the pending-input cache patterns
     PCache,
     SpkCache,
     SpvCache,

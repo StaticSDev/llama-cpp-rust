@@ -202,7 +202,6 @@ impl LlmType {
             Self::T1_8B => "1.8B",
             Self::T2B => "2B",
             Self::T2_6B => "2.6B",
-            Self::T26B => "2.6B",
             Self::T2_8B => "2.8B",
             Self::T2_9B => "2.9B",
             Self::T3B => "3B",
