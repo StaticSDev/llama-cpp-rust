@@ -690,7 +690,6 @@ impl Sampler for Mirostat {
         softmax_impl(cur, true);
 
         // Estimate s_hat using the most probable m tokens
-        let mut s_hat = 0.0f32;
         let mut sum_ti_bi = 0.0f32;
         let mut sum_ti_sq = 0.0f32;
         let limit = (self.m - 1).max(0) as usize;
@@ -701,7 +700,7 @@ impl Sampler for Mirostat {
             sum_ti_bi += t_i * b_i;
             sum_ti_sq += t_i * t_i;
         }
-        s_hat = sum_ti_bi / sum_ti_sq;
+        let s_hat = sum_ti_bi / sum_ti_sq;
 
         // Compute k from the estimated s_hat and target surprise value
         let epsilon_hat = s_hat - 1.0;
@@ -873,6 +872,7 @@ impl Sampler for GrammarSampler {
 
 #[derive(Clone)]
 struct Penalties {
+    #[allow(dead_code)]
     n_vocab: i32,
     penalty_last_n: i32,
     penalty_repeat: f32,
@@ -1543,6 +1543,7 @@ impl Sampler for AdaptiveP {
 
 #[derive(Clone)]
 struct LogitBiasSampler {
+    #[allow(dead_code)]
     n_vocab: i32,
     logit_bias: Vec<LogitBias>,
     to_search: Vec<LogitBias>,

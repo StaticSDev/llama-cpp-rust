@@ -209,6 +209,7 @@ struct ChainEntry {
 pub struct Chain {
     params: ChainParams,
     is_init: bool,
+    #[allow(dead_code)]
     n_nodes: u32,
     samplers: Vec<ChainEntry>,
     cur: Vec<TokenData>,
