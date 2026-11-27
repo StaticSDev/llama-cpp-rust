@@ -213,7 +213,7 @@ impl Cvec {
             None => return cur.clone(),
         };
 
-        let mut out = ctx.push_tensor("", cur.ne, cur.type_, "");
+        let out = ctx.push_tensor("", cur.ne, cur.type_, "");
         let cur_bytes = cur.bytes();
         let dir_bytes = layer_dir.bytes();
         let mut sum = vec![0u8; out.nbytes()];
@@ -233,6 +233,7 @@ impl Cvec {
             let n = cur_bytes.len().min(sum.len());
             sum[..n].copy_from_slice(&cur_bytes[..n]);
         }
+        out.zero();
         out.set_bytes(&sum);
         out
     }
@@ -795,7 +796,7 @@ mod tests {
 
         let mut buf = [0xffu8; 4];
         assert_eq!(llama_adapter_meta_val_str(&lora, "general.type", &mut buf), 7);
-        assert_eq!(buf, [b'a', b'd', b'a', b'p']);
+        assert_eq!(buf, [b'a', b'd', b'a', 0]);
 
         assert_eq!(llama_adapter_meta_val_str(&lora, "missing", &mut buf), -1);
         assert_eq!(buf[0], 0);
@@ -804,7 +805,7 @@ mod tests {
     #[test]
     fn free_unregisters_adapter() {
         let m = model(1, 1);
-        let mut lora = Lora::new(&m);
+        let lora = Lora::new(&m);
         m.borrow_mut().loras.insert(lora.id());
         llama_adapter_lora_free(&mut Some(lora));
         assert!(m.borrow().loras.is_empty());
@@ -829,8 +830,8 @@ mod tests {
             t.data = vec![0u8; ne[0] as usize * ne[1] as usize * 4];
             t
         };
-        gguf_add_tensor(&mut g, &mk("blk.0.attn_q.lora_a", [4, 8, 1, 1]));
-        gguf_add_tensor(&mut g, &mk("blk.0.attn_q.lora_b", [8, 4, 1, 1]));
+        gguf_add_tensor(&mut g, &mk("blk.0.attn_q.weight.lora_a", [4, 8, 1, 1]));
+        gguf_add_tensor(&mut g, &mk("blk.0.attn_q.weight.lora_b", [8, 4, 1, 1]));
         let bytes = gguf_write_to_buf(&g, false);
 
         let m = model(4, 1);
