@@ -5647,7 +5647,7 @@ mod tests {
         assert_eq!(trie.get_longest_prefix(b"abxyz", 0), 2);
         assert_eq!(trie.get_longest_prefix(b"abcdef", 0), 4);
         assert_eq!(trie.get_longest_prefix(b"zzzz", 0), 0);
-        assert_eq!(trie.traverse(b'a').unwrap().value, 3);
+        assert_eq!(trie.traverse(b'a').unwrap().traverse(b'b').unwrap().value, 3);
         assert_eq!(parse_hex_byte("0A"), 10);
     }
 }
