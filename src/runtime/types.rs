@@ -40,7 +40,10 @@ impl Weight {
 
     pub fn row<'a>(&self, data: &'a [u8], row: usize) -> Result<&'a [u8]> {
         let n = self.row_bytes();
-        let start = self.offset + row.checked_mul(n).ok_or_else(|| Error::new("weight row overflow"))?;
+        let start = self.offset
+            + row
+                .checked_mul(n)
+                .ok_or_else(|| Error::new("weight row overflow"))?;
         data.get(start..start + n)
             .ok_or_else(|| Error::new(format!("weight row {row} outside GGUF data")))
     }
@@ -79,6 +82,8 @@ pub struct Weights {
     pub data: Arc<Vec<u8>>,
     pub params: ModelParams,
     pub vocab: LlamaVocab,
+    #[cfg(feature = "cuda")]
+    pub gpu: Option<std::sync::Arc<crate::runtime::cuda::CudaWeights>>,
 }
 
 impl Weights {
@@ -86,6 +91,11 @@ impl Weights {
         self.map
             .get(name)
             .ok_or_else(|| Error::new(format!("missing tensor {name}")))
+    }
+
+    #[cfg(feature = "cuda")]
+    pub fn gpu(&self) -> Option<&crate::runtime::cuda::CudaWeights> {
+        self.gpu.as_deref()
     }
 }
 

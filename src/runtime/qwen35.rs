@@ -4,13 +4,31 @@ use crate::core::{Error, Result};
 use crate::runtime::math::{
     dequant_row, matvec, rmsnorm, rope_inplace, sigmoid, silu, softmax_inplace,
 };
-use crate::runtime::types::{ModelState, Weights};
+use crate::runtime::types::{ModelState, Weight, Weights};
+
+/// Read one weight row, from the GPU when available.
+fn row_into(w: &Weights, wt: &Weight, row: usize, out: &mut [f32]) -> Result<()> {
+    #[cfg(feature = "cuda")]
+    if let Some(gpu) = w.gpu() {
+        return gpu.row(wt, row, out);
+    }
+    dequant_row(wt.ty, wt.row(w.data.as_slice(), row)?, out)
+}
+
+/// Multiply a weight by `x`, on the GPU when available.
+fn matvec_into(w: &Weights, wt: &Weight, x: &[f32], out: &mut [f32]) -> Result<()> {
+    #[cfg(feature = "cuda")]
+    if let Some(gpu) = w.gpu() {
+        return gpu.matvec(wt, x, out);
+    }
+    matvec(w.data.as_slice(), wt, x, out)
+}
 
 /// Read a one-dimensional weight as floats.
 fn read_vec(w: &Weights, name: &str) -> Result<Vec<f32>> {
     let wt = w.get(name)?;
     let mut out = vec![0.0f32; wt.in_features()];
-    dequant_row(wt.ty, wt.row(w.data.as_slice(), 0)?, &mut out)?;
+    row_into(w, wt, 0, &mut out)?;
     Ok(out)
 }
 
@@ -25,14 +43,13 @@ fn l2_norm_inplace(x: &mut [f32], eps: f32) {
 /// Run one token through the model, updating the recurrent and KV state.
 pub fn forward(w: &Weights, st: &mut ModelState, token: i32) -> Result<Vec<f32>> {
     let p = &w.params;
-    let data = w.data.as_slice();
 
     let emb = w.get("token_embd.weight")?;
     if token < 0 || token as usize >= emb.out_features() {
         return Err(Error::new("token id outside vocabulary"));
     }
     let mut x = vec![0.0f32; p.n_embd];
-    dequant_row(emb.ty, emb.row(data, token as usize)?, &mut x)?;
+    row_into(w, emb, token as usize, &mut x)?;
 
     let ds = p.ssm_state;
     let nk = p.ssm_group;
@@ -54,30 +71,30 @@ pub fn forward(w: &Weights, st: &mut ModelState, token: i32) -> Result<Vec<f32>>
             let li = il - fi;
 
             let mut qkv = vec![0.0f32; channels];
-            matvec(
-                data,
+            matvec_into(
+                w,
                 w.get(&format!("blk.{il}.attn_qkv.weight"))?,
                 &norm,
                 &mut qkv,
             )?;
             let mut z = vec![0.0f32; value_dim];
-            matvec(
-                data,
+            matvec_into(
+                w,
                 w.get(&format!("blk.{il}.attn_gate.weight"))?,
                 &norm,
                 &mut z,
             )?;
 
             let mut beta_raw = vec![0.0f32; nv];
-            matvec(
-                data,
+            matvec_into(
+                w,
                 w.get(&format!("blk.{il}.ssm_beta.weight"))?,
                 &norm,
                 &mut beta_raw,
             )?;
             let mut alpha_raw = vec![0.0f32; nv];
-            matvec(
-                data,
+            matvec_into(
+                w,
                 w.get(&format!("blk.{il}.ssm_alpha.weight"))?,
                 &norm,
                 &mut alpha_raw,
@@ -96,11 +113,7 @@ pub fn forward(w: &Weights, st: &mut ModelState, token: i32) -> Result<Vec<f32>>
             let ksize = p.conv_kernel;
             let mut kernel = vec![0.0f32; channels * ksize];
             for c in 0..channels {
-                dequant_row(
-                    kw.ty,
-                    kw.row(data, c)?,
-                    &mut kernel[c * ksize..(c + 1) * ksize],
-                )?;
+                row_into(w, kw, c, &mut kernel[c * ksize..(c + 1) * ksize])?;
             }
 
             let mut conv_input = vec![0.0f32; ksize * channels];
@@ -170,8 +183,8 @@ pub fn forward(w: &Weights, st: &mut ModelState, token: i32) -> Result<Vec<f32>>
             }
 
             let mut attn = vec![0.0f32; p.n_embd];
-            matvec(
-                data,
+            matvec_into(
+                w,
                 w.get(&format!("blk.{il}.ssm_out.weight"))?,
                 &out,
                 &mut attn,
@@ -182,8 +195,8 @@ pub fn forward(w: &Weights, st: &mut ModelState, token: i32) -> Result<Vec<f32>>
             fi += 1;
 
             let mut qg = vec![0.0f32; p.n_head * hd * 2];
-            matvec(
-                data,
+            matvec_into(
+                w,
                 w.get(&format!("blk.{il}.attn_q.weight"))?,
                 &norm,
                 &mut qg,
@@ -201,19 +214,9 @@ pub fn forward(w: &Weights, st: &mut ModelState, token: i32) -> Result<Vec<f32>>
             }
 
             let mut k = vec![0.0f32; p.n_head_kv * hd];
-            matvec(
-                data,
-                w.get(&format!("blk.{il}.attn_k.weight"))?,
-                &norm,
-                &mut k,
-            )?;
+            matvec_into(w, w.get(&format!("blk.{il}.attn_k.weight"))?, &norm, &mut k)?;
             let mut v = vec![0.0f32; p.n_head_kv * hd];
-            matvec(
-                data,
-                w.get(&format!("blk.{il}.attn_v.weight"))?,
-                &norm,
-                &mut v,
-            )?;
+            matvec_into(w, w.get(&format!("blk.{il}.attn_v.weight"))?, &norm, &mut v)?;
             for h in 0..p.n_head_kv {
                 let kh = &mut k[h * hd..(h + 1) * hd];
                 kh.copy_from_slice(&rmsnorm(kh, &kn, p.eps));
@@ -254,8 +257,8 @@ pub fn forward(w: &Weights, st: &mut ModelState, token: i32) -> Result<Vec<f32>>
             }
 
             let mut attn = vec![0.0f32; p.n_embd];
-            matvec(
-                data,
+            matvec_into(
+                w,
                 w.get(&format!("blk.{il}.attn_output.weight"))?,
                 &attn_out,
                 &mut attn,
@@ -273,15 +276,15 @@ pub fn forward(w: &Weights, st: &mut ModelState, token: i32) -> Result<Vec<f32>>
             p.eps,
         );
         let mut up = vec![0.0f32; p.n_ff];
-        matvec(
-            data,
+        matvec_into(
+            w,
             w.get(&format!("blk.{il}.ffn_up.weight"))?,
             &norm2,
             &mut up,
         )?;
         let mut g = vec![0.0f32; p.n_ff];
-        matvec(
-            data,
+        matvec_into(
+            w,
             w.get(&format!("blk.{il}.ffn_gate.weight"))?,
             &norm2,
             &mut g,
@@ -290,8 +293,8 @@ pub fn forward(w: &Weights, st: &mut ModelState, token: i32) -> Result<Vec<f32>>
             *u *= silu(*gi);
         }
         let mut ffn = vec![0.0f32; p.n_embd];
-        matvec(
-            data,
+        matvec_into(
+            w,
             w.get(&format!("blk.{il}.ffn_down.weight"))?,
             &up,
             &mut ffn,
@@ -303,7 +306,7 @@ pub fn forward(w: &Weights, st: &mut ModelState, token: i32) -> Result<Vec<f32>>
 
     let h = rmsnorm(&x, &read_vec(w, "output_norm.weight")?, p.eps);
     let mut logits = vec![0.0f32; emb.out_features()];
-    matvec(data, emb, &h, &mut logits)?;
+    matvec_into(w, emb, &h, &mut logits)?;
     st.pos += 1;
     Ok(logits)
 }

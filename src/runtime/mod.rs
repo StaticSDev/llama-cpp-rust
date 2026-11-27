@@ -1,5 +1,7 @@
 //! Minimal CPU inference runtime for dense/hybrid Qwen models.
 
+#[cfg(feature = "cuda")]
+pub mod cuda;
 pub mod generate;
 pub mod loader;
 pub mod math;

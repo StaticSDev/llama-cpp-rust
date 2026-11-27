@@ -3,8 +3,7 @@
 use crate::core::{Error, Result};
 use crate::gguf::{
     gguf_find_key, gguf_get_arr_data, gguf_get_arr_n, gguf_get_arr_str, gguf_get_tensor_name,
-    gguf_get_val_f32, gguf_get_val_u32, gguf_init_from_file, GgufContext, GgufInitParams,
-    GgufType,
+    gguf_get_val_f32, gguf_get_val_u32, gguf_init_from_file, GgufContext, GgufInitParams, GgufType,
 };
 use crate::runtime::types::{ModelParams, Weight, Weights};
 use crate::vocab::metadata::Metadata;
@@ -120,6 +119,11 @@ fn build_metadata(ctx: &GgufContext) -> Metadata {
 
 /// Load model parameters, tensors and tokenizer from `path`.
 pub fn load(path: &str) -> Result<Weights> {
+    load_with_gpu(path, false)
+}
+
+/// Load a model, uploading its tensors to the GPU when `use_gpu` is set.
+pub fn load_with_gpu(path: &str, use_gpu: bool) -> Result<Weights> {
     let ctx = gguf_init_from_file(path, &mut GgufInitParams::default())?;
 
     // The GGUF reader only fills `ctx.data` when a ggml context is requested.
@@ -181,10 +185,32 @@ pub fn load(path: &str) -> Result<Weights> {
     let mut vocab = LlamaVocab::new();
     vocab.load(&meta)?;
 
+    #[cfg(feature = "cuda")]
+    let mut data = Arc::new(blob);
+    #[cfg(not(feature = "cuda"))]
+    let data = Arc::new(blob);
+
+    #[cfg(feature = "cuda")]
+    let gpu = if use_gpu {
+        let gpu = crate::runtime::cuda::CudaWeights::new(data.as_slice(), map.values())?;
+        // Free the host copy after upload to stay within the RAM budget.
+        let _empty = std::mem::take(Arc::make_mut(&mut data));
+        Some(Arc::new(gpu))
+    } else {
+        None
+    };
+
+    #[cfg(not(feature = "cuda"))]
+    if use_gpu {
+        return Err(Error::new("built without the cuda feature"));
+    }
+
     Ok(Weights {
         map,
-        data: Arc::new(blob),
+        data,
         params,
         vocab,
+        #[cfg(feature = "cuda")]
+        gpu,
     })
 }

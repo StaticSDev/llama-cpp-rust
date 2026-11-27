@@ -27,6 +27,9 @@ pub mod model;
 pub mod model_loader;
 pub mod quant;
 pub mod runtime;
+#[cfg(feature = "cuda")]
+#[path = "runtime/cuda.rs"]
+pub mod cuda;
 pub mod r#impl;
 pub mod sampler;
 pub mod tools;

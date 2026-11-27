@@ -3,7 +3,7 @@
 use std::env;
 
 use llama_cpp_rust::runtime::generate::generate;
-use llama_cpp_rust::runtime::loader::load;
+use llama_cpp_rust::runtime::loader::{load, load_with_gpu};
 
 const USAGE: &str = "\
 Usage: llama-rs --model <path> --prompt <text> [options]
@@ -14,6 +14,7 @@ Options:
   -n, --n-predict <n>   Max tokens to generate (default: 64)
   --temp <f32>          Sampling temperature; 0 means greedy (default: 0)
   --top-p <f32>         Nucleus sampling mass (default: 0.9)
+  --gpu                 Use CUDA GPU weights (needs cuda feature)
   --help                Print this help";
 
 fn main() {
@@ -29,6 +30,7 @@ fn run() -> std::result::Result<(), String> {
     let mut n_predict = 64usize;
     let mut temp = 0.0f32;
     let mut top_p = 0.9f32;
+    let mut gpu = false;
 
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -57,12 +59,24 @@ fn run() -> std::result::Result<(), String> {
                     .parse::<f32>()
                     .map_err(|e| format!("invalid --top-p value '{raw}': {e}"))?;
             }
+            "--gpu" => gpu = true,
             other => return Err(format!("unknown argument: {other}\n{USAGE}")),
         }
     }
 
     let model = model.ok_or_else(|| format!("missing --model\n{USAGE}"))?;
-    let weights = load(model.as_str()).map_err(|e| e.to_string())?;
+    let weights = if gpu {
+        load_with_gpu(model.as_str(), true)
+    } else {
+        load(model.as_str())
+    }
+    .map_err(|e| e.to_string())?;
+    #[cfg(feature = "cuda")]
+    {
+        if let Some(g) = weights.gpu() {
+            println!("{}", g.info());
+        }
+    }
     let output = generate(&weights, &prompt, n_predict, temp, top_p).map_err(|e| e.to_string())?;
     println!("{output}");
     Ok(())
