@@ -1357,7 +1357,7 @@ fn cp_at(code_points: &[u32], depth: usize) -> u32 {
 // checks the code point at depth of each candidate (an index into the input) against the stack
 // returns true when some match: they go to next, and the stacks that follow to next_stacks
 fn reject_step(
-    rules: &GrammarRules,
+    rules: &[GrammarRule],
     stack: &GrammarStack,
     candidates: &[GrammarCandidate],
     depth: usize,
