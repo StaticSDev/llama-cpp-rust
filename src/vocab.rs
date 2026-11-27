@@ -399,7 +399,7 @@ pub fn unicode_cpt_flags_from_cpt(cpt: u32) -> UnicodeCptFlags {
     if is_combining_mark(c) {
         flags |= UnicodeCptFlags::ACCENT_MARK | UnicodeCptFlags::NFD;
     }
-    if c.is_ascii_punctuation() || unicode_cpt_is_han(c) {
+    if c.is_ascii_punctuation() || unicode_cpt_is_han(c as u32) {
         // Han is categorized here only so WPM keeps single CJK glyphs apart.
         if c.is_ascii_punctuation() {
             flags |= UnicodeCptFlags::PUNCTUATION;
@@ -1028,7 +1028,7 @@ fn parse_hex_byte(s: &str) -> u8 {
 }
 
 // no recursion: a token from the GGUF can be long
-#[derive(Default)]
+#[derive(Clone, Debug, Default)]
 struct NaiveTrie {
     children: BTreeMap<u8, NaiveTrie>,
     has_value: bool,
@@ -1268,7 +1268,8 @@ impl<'a> SpmSession<'a> {
             }
 
             // merge the right sym into the left one
-            self.symbols[left].merge_right(&self.symbols[right]);
+            let right_sym = self.symbols[right].clone();
+            self.symbols[left].merge_right(&right_sym);
             self.symbols[right].n = 0;
 
             // remove the right sym from the chain
@@ -1666,7 +1667,8 @@ impl<'a> BpeSession<'a> {
                 }
 
                 // merge the right sym into the left one
-                self.symbols[l].merge_right(&self.symbols[r]);
+                let right_sym = self.symbols[r].clone();
+                self.symbols[l].merge_right(&right_sym);
                 self.symbols[r].n = 0;
 
                 // remove the right sym from the chain
@@ -3273,6 +3275,7 @@ impl Impl {
                 self.token_to_id.get(&hex_str).copied().unwrap_or(LLAMA_TOKEN_NULL)
             }
             VocabType::Test => LLAMA_TOKEN_NULL, // TEST tokens have no byte-level mapping
+            VocabType::Rwkv => LLAMA_TOKEN_NULL, // RWKV tokens have no byte-level mapping
             VocabType::None => LLAMA_TOKEN_NULL,
         }
     }
@@ -4140,7 +4143,7 @@ impl Impl {
             .collect();
 
         for (text, tid) in &pairs {
-            if tid < 0 || *tid as usize >= self.id_to_token.len() {
+            if *tid < 0 || *tid as usize >= self.id_to_token.len() {
                 continue;
             }
             let attr = &mut self.id_to_token[*tid as usize].attr;
