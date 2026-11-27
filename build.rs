@@ -23,8 +23,13 @@ fn main() {
     }
 
     println!("cargo:rustc-link-search=native={}", out_dir.display());
+    if let Ok(path) = env::var("CUDA_PATH") {
+        println!("cargo:rustc-link-search=native={path}/lib64");
+    }
+    println!("cargo:rustc-link-search=native=/opt/cuda/lib64");
     println!("cargo:rustc-link-lib=static=lcrcuda");
     println!("cargo:rustc-link-lib=dylib=cudart");
+    println!("cargo:rustc-link-lib=dylib=stdc++");
     println!("cargo:rerun-if-changed=cuda/lcr_kernels.cu");
     println!("cargo:rerun-if-changed=cuda/lcr_kernels.cuh");
 }

@@ -79,6 +79,8 @@ impl ModelParams {
 
 pub struct Weights {
     pub map: HashMap<String, Weight>,
+    /// Host copies of small F32 tensors, available even in GPU mode.
+    pub small: HashMap<String, Vec<f32>>,
     pub data: Arc<Vec<u8>>,
     pub params: ModelParams,
     pub vocab: LlamaVocab,

@@ -26,6 +26,9 @@ fn matvec_into(w: &Weights, wt: &Weight, x: &[f32], out: &mut [f32]) -> Result<(
 
 /// Read a one-dimensional weight as floats.
 fn read_vec(w: &Weights, name: &str) -> Result<Vec<f32>> {
+    if let Some(values) = w.small.get(name) {
+        return Ok(values.clone());
+    }
     let wt = w.get(name)?;
     let mut out = vec![0.0f32; wt.in_features()];
     row_into(w, wt, 0, &mut out)?;
@@ -109,11 +112,16 @@ pub fn forward(w: &Weights, st: &mut ModelState, token: i32) -> Result<Vec<f32>>
                 gate[h] = a[h] * (1.0f32 + (alpha_raw[h] + dt_bias[h]).exp()).ln();
             }
 
-            let kw = w.get(&format!("blk.{il}.ssm_conv1d.weight"))?;
             let ksize = p.conv_kernel;
             let mut kernel = vec![0.0f32; channels * ksize];
-            for c in 0..channels {
-                row_into(w, kw, c, &mut kernel[c * ksize..(c + 1) * ksize])?;
+            let kname = format!("blk.{il}.ssm_conv1d.weight");
+            if let Some(values) = w.small.get(&kname) {
+                kernel.copy_from_slice(values);
+            } else {
+                let kw = w.get(&kname)?;
+                for c in 0..channels {
+                    row_into(w, kw, c, &mut kernel[c * ksize..(c + 1) * ksize])?;
+                }
             }
 
             let mut conv_input = vec![0.0f32; ksize * channels];

@@ -3,7 +3,8 @@
 use crate::core::{Error, Result};
 use crate::gguf::{
     gguf_find_key, gguf_get_arr_data, gguf_get_arr_n, gguf_get_arr_str, gguf_get_tensor_name,
-    gguf_get_val_f32, gguf_get_val_u32, gguf_init_from_file, GgufContext, GgufInitParams, GgufType,
+    gguf_get_val_f32, gguf_get_val_u32, gguf_init_from_file, GgmlType, GgufContext,
+    GgufInitParams, GgufType,
 };
 use crate::runtime::types::{ModelParams, Weight, Weights};
 use crate::vocab::metadata::Metadata;
@@ -169,14 +170,32 @@ pub fn load_with_gpu(path: &str, use_gpu: bool) -> Result<Weights> {
     };
 
     let mut map = HashMap::with_capacity(ctx.info.len());
+    // Small F32 tensors (norms, conv kernels, biases) stay on the host even
+    // in GPU mode: reading them one row at a time costs more than the math.
+    let mut small = HashMap::new();
     for (i, info) in ctx.info.iter().enumerate() {
         let name = gguf_get_tensor_name(&ctx, i as i64).to_owned();
+        let ne = [info.t.ne[0] as usize, info.t.ne[1] as usize];
+        let offset = info.offset as usize;
+        if info.t.type_ == GgmlType::F32 {
+            let count = ne[0] * ne[1];
+            if count <= 1 << 20 {
+                let end = offset + count * 4;
+                if let Some(bytes) = blob.get(offset..end) {
+                    let values = bytes
+                        .chunks_exact(4)
+                        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                        .collect();
+                    small.insert(name.clone(), values);
+                }
+            }
+        }
         map.insert(
             name,
             Weight {
-                ne: [info.t.ne[0] as usize, info.t.ne[1] as usize],
+                ne,
                 ty: info.t.type_,
-                offset: info.offset as usize,
+                offset,
             },
         );
     }
@@ -207,6 +226,7 @@ pub fn load_with_gpu(path: &str, use_gpu: bool) -> Result<Weights> {
 
     Ok(Weights {
         map,
+        small,
         data,
         params,
         vocab,
