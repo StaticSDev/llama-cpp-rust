@@ -1,45 +1,26 @@
-# llama-cpp-rust
+# llama.cpp → Rust
 
-Rust rewrite of [llama.cpp](https://github.com/ggml-org/llama.cpp).
+[Русский](README.ru.md) · English
 
-## State
+A working Rust port of llama.cpp with a CPU fallback, an optional CUDA backend
+for Turing GPUs, and a local pixel-styled chat app.
 
-Port from pinned upstream commit `15fcfc7357f8de73671d39e7d8c594e1beb3052d`.
-`cargo check`, `cargo build` and `cargo test` all pass with zero warnings:
-248 tests, 0 failures. Each module keeps the base name of its C/C++ source.
+The reference tree is pinned at commit `15fcfc7357f8de73671d39e7d8c594e1beb3052d`.
+It is kept in `reference/llama.cpp` and is not committed.
 
-Ported modules:
+---
 
-- core: `core`, `impl`, `cparams`, `io`
-- ggml: `ggml/types`, `ggml/tensor`, `ggml/quants`, `ggml/alloc`,
-  `ggml/backend`, `ggml/opt`, `ggml/threading`
-- llama: `gguf`, `vocab`, `sampler`, `kv_cache`, `grammar`, `batch`, `arch`,
-  `hparams`, `json`, `unicode`, `chat`, `mmap`, `model`, `model_loader`,
-  `context`, `graph`, `memory`, `quant`, `adapter`, `api`
-- common: `common`, `arg`, `sampling`, `speculative`, `ngram`, `json_schema`,
-  `jinja`, `chat_parser`, `download`, `console`, `misc`
-- tools: `server`, `cli`, `bench`, `quantize`, `completion`, `batched_bench`,
-  `mtmd`, `perplexity`, `imatrix`, `misc`
+## What works
 
-Not ported yet:
+- Qwen3.5 dense and hybrid layers: gated delta net, full attention, RoPE, FFN.
+- GGUF loading for Q4_K, Q5_K, Q6_K, Q8_0, F32, F16 and BF16 tensors.
+- Greedy and temperature + top-p sampling.
+- CPU matvec across 12 threads; CUDA matvec with weights resident in VRAM.
+- A std-only HTTP server with newline-delimited streaming and live telemetry.
 
-- examples and Python conversion scripts
-- backend-specific GPU/RPC/Hexagon paths and real numeric graph execution
-- live inference runtime; tool entry points use injected traits/callbacks
+## Quick start
 
-The unmodified C/C++ tree is downloaded locally into `reference/llama.cpp` and
-ignored by git. It is the translation reference, not part of this repository.
-
-## Layout
-
-- `src/<module>/` - one llama.cpp module per directory, split into subfiles.
-- `src/<module>/mod.rs` - module declarations and re-exports.
-- `reference/` - local upstream checkout, gitignored.
-
-## Run a model
-
-A small CPU runtime for Qwen3.5 dense/hybrid GGUF lives in `src/runtime/`.
-Models are not committed; download one into `models/` first.
+Default build, CPU only:
 
 ```sh
 cargo build --release --bin llama-rs
@@ -48,14 +29,7 @@ target/release/llama-rs \
   --prompt "Hi, who are you?" -n 8 --temp 0
 ```
 
-The runtime dequantizes one weight row at a time. Greedy (`--temp 0`) and
-temperature + top-p sampling are supported.
-
-## GPU (Turing and newer)
-
-The optional CUDA backend keeps quantized weights in VRAM and runs matvec on
-the GPU. Kernels are compiled by `nvcc -arch=sm_75`; the default build stays
-CPU-only.
+CUDA build, Turing and newer (`sm_75`):
 
 ```sh
 cargo build --release --features cuda --bin llama-rs
@@ -64,14 +38,10 @@ target/release/llama-rs \
   --prompt "Hi, who are you?" -n 8 --temp 0 --gpu
 ```
 
-Verified on GTX 1660 SUPER (6 GB): ~7 tokens/s versus ~0.8 tokens/s on CPU.
-Small F32 tensors stay on the host, so the model plus KV state fit in VRAM.
+`build.rs` compiles `cuda/lcr_kernels.cu` with `nvcc -arch=sm_75`.
+Without `--features cuda`, the `--gpu` flag returns a clear error.
 
 ## Web chat
-
-A pixel-styled chat app is served by the same Rust binary. It has a sidebar
-with saved chats (`localStorage`), a reasoning block, live prefill progress,
-and tokens per second.
 
 ```sh
 cargo build --release --features cuda --bin llama-web
@@ -80,10 +50,78 @@ target/release/llama-web \
   --port 8080 --gpu
 ```
 
-Drop `--features cuda` and `--gpu` for a CPU-only build. Open
-`http://127.0.0.1:8080/`. The page streams `POST /api/chat/stream`
-(newline-delimited JSON). One request is processed at a time.
+Open <http://127.0.0.1:8080/>. The interface keeps chats in `localStorage`,
+shows prefill progress as ten pixel segments, and reports prefill and decode
+speed in tokens per second. One request is handled at a time.
+
+API:
+
+| Route | Purpose |
+| --- | --- |
+| `GET /api/status` | Model path, ready flag, GPU name |
+| `POST /api/chat/stream` | NDJSON events: `prompt`, `token`, `done`, `error` |
+
+---
+
+## Speed benchmark
+
+Measured with `bench/speed_bench.py` on the same prompt. Each engine runs in
+isolation so only one copy of the model occupies VRAM.
+
+**Hardware:** GTX 1660 SUPER (TU116, 6 GB), CUDA 13.4, driver 615.78, 12 CPU
+threads, 15 GiB RAM. **Model:** Qwen3.5-4B-Q4_K_M.gguf.
+
+| Metric | llama.cpp upstream | Rust port | Rust / upstream |
+| --- | ---: | ---: | ---: |
+| Cold prefill, 203 / 202 tokens | 154.98 tok/s | 6.51 tok/s | 0.04× |
+| Generation, 6 tokens | 46.14 tok/s | 6.53 tok/s | 0.14× |
+| Generation, 200 tokens, 3 runs | 54.57 tok/s | 6.34 tok/s | 0.12× |
+
+Upstream flags: `-ngl 99 -c 32768 -t 6 -tb 12 -b 2048 -ub 512 -np 1 -fa on
+-ctk q4_0 -ctv q4_0 --context-shift --jinja`. Prompt cache reuse was disabled
+for the cold-prefill number.
+
+The short six-token run is noisy; the 200-token run is the stable reference.
+The Rust port is roughly 8× slower than upstream. The GPU kernels dequantize
+scalars per element, launch once per matrix, synchronize after each launch, and
+run attention and recurrent state on the CPU. Upstream reaches the memory
+bandwidth limit of this card; this port does not.
+
+Reproduce:
+
+```sh
+python3 bench/speed_bench.py --runs 1 --max-tokens 6 --out bench/results.json
+```
+
+Raw data: [bench/results.json](bench/results.json).
+
+---
+
+## Layout
+
+```text
+src/
+  runtime/     loader, dequant math, Qwen3.5 forward, sampler, CUDA FFI
+  gguf/        GGUF container and type tables
+  ggml/        block layouts, quantizers, backend scaffolding
+  vocab/       tokenizer and chat metadata
+  web/         HTTP server and static chat app
+cuda/          sm_75 dequant and matvec kernels, compiled by build.rs
+bench/         speed comparison against upstream llama.cpp
+reference/     pinned llama.cpp source, gitignored
+models/        local GGUF files, gitignored
+```
+
+## Tests
+
+```sh
+cargo test                 # 250 passed
+cargo test --features cuda # 250 passed
+```
+
+Zero warnings in both configurations.
 
 ## License
 
-Original code: MIT, Copyright (c) 2023-2026 ggml authors. See `LICENSE`.
+Portions derived from llama.cpp remain under the original MIT license,
+Copyright (c) 2023–2026 ggml authors. See `LICENSE`.
