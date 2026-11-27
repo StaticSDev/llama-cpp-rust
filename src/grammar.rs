@@ -1434,7 +1434,7 @@ fn reject_step(
 // the candidates that no stack accepts, each stack narrows the rejects of the previous one
 // no recursion: a level per code point, a token from the GGUF can be long
 fn reject_candidates(
-    rules: &GrammarRules,
+    rules: &[GrammarRule],
     stacks: &GrammarStacks,
     candidates: &[GrammarCandidate],
 ) -> GrammarCandidates {
