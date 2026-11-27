@@ -475,6 +475,10 @@ impl Sampler for Empty {
     }
 
     fn apply(&mut self, _cur: &mut TokenDataArray) {}
+
+    fn clone_sampler(&self) -> Box<dyn Sampler> {
+        Box::new(self.clone())
+    }
 }
 
 // ---------------------------------------------------------------------------
