@@ -247,6 +247,7 @@ fn set_f32(t: &Tensor, v: f32) {
     write_f32_data(t, &vec![v; n]);
 }
 
+#[allow(dead_code)] // kept for fidelity with ggml_get_data_f32 helpers
 fn first_f32(t: &Tensor) -> f32 {
     f32_data(t).first().copied().unwrap_or(0.0)
 }
@@ -283,12 +284,14 @@ fn write_i64_data(t: &Tensor, vals: &[i64]) {
     }
 }
 
+#[allow(dead_code)] // kept for fidelity with ggml_backend_tensor_set
 fn tensor_set(t: &Tensor, src: &[u8], offset: usize) {
     let d = t.borrow();
     let mut buf = d.data.borrow_mut();
     buf[offset..offset + src.len()].copy_from_slice(src);
 }
 
+#[allow(dead_code)] // kept for fidelity with ggml_backend_tensor_get
 fn tensor_get(t: &Tensor, offset: usize, size: usize) -> Vec<u8> {
     let d = t.borrow();
     let buf = d.data.borrow();
@@ -875,6 +878,7 @@ impl BackendSched {
         }
     }
 
+    #[allow(dead_code)] // kept for fidelity with ggml_backend_sched_get_backend
     fn get_backend(&self, i: usize) -> usize {
         i.min(self.n_backends.saturating_sub(1))
     }
@@ -914,6 +918,7 @@ fn alloc_ctx_tensors_from_buft(ctx: &mut Context) {
 
 pub struct Dataset {
     pub ctx: Context,
+    #[allow(dead_code)] // mirrors the dataset backend buffer flag
     allocated: bool,
     pub data: Tensor,
     pub labels: Option<Tensor>,
