@@ -11,10 +11,3 @@ pub mod backend;
 pub mod opt;
 pub mod threading;
 
-pub use types::*;
-pub use tensor::*;
-pub use quants::*;
-pub use alloc::*;
-pub use backend::*;
-pub use opt::*;
-pub use threading::*;
