@@ -161,10 +161,10 @@ impl ThreadPool {
 
         let mut workers = Vec::with_capacity(params.n_threads);
         for ith in 0..params.n_threads {
-            let inner = Arc::clone(&inner);
+            let worker_inner = Arc::clone(&inner);
             match thread::Builder::new()
                 .name(format!("ggml-{ith}"))
-                .spawn(move || worker(inner, ith))
+                .spawn(move || worker(worker_inner, ith))
             {
                 Ok(handle) => workers.push(handle),
                 Err(e) => {

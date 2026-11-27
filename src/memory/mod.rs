@@ -136,9 +136,7 @@ pub trait TensorIoWrite: IoWrite {
 pub trait TensorIoRead: IoRead {
     fn read_tensor(&mut self, tensor: &Tensor, offset: usize, size: usize) -> bool {
         let mut buf = vec![0u8; size];
-        if !self.read(&mut buf) {
-            return false;
-        }
+        self.read(&mut buf);
         let mut storage = tensor.storage.borrow_mut();
         let off = tensor.offset + offset;
         let end = (off + size).min(storage.len());
