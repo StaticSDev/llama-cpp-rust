@@ -26,6 +26,7 @@ pub mod mmap;
 pub mod model;
 pub mod model_loader;
 pub mod quant;
+pub mod runtime;
 pub mod r#impl;
 pub mod sampler;
 pub mod tools;
