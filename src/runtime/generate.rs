@@ -2,10 +2,9 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::core::{Error, Mt19937, Result};
+use crate::core::{Error, Mt19937, Result, Token};
 use crate::runtime::qwen35;
 use crate::runtime::types::{ModelState, Weights};
-use crate::vocab::Token;
 
 fn forward_logits(w: &Weights, st: &mut ModelState, tok: Token) -> Result<Vec<f32>> {
     let logits = qwen35::forward(w, st, tok)?;

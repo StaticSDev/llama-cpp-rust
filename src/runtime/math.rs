@@ -172,7 +172,7 @@ pub fn rmsnorm(x: &[f32], w: &[f32], eps: f32) -> Vec<f32> {
 pub fn rope_inplace(x: &mut [f32], pos: usize, n_rot: usize, base: f32) {
     let half = n_rot / 2;
     for i in 0..half {
-        let theta = pos as f32 * base.powf(-(2 * i) as f32 / n_rot as f32);
+        let theta = pos as f32 * base.powf(-((2 * i) as f32) / n_rot as f32);
         let c = theta.cos();
         let s = theta.sin();
         let a = x[i];
