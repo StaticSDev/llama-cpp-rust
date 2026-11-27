@@ -2181,7 +2181,14 @@ mod tests {
         assert_eq!(cps, vec![0xE9, 0]);
         assert_eq!(partial.n_remain, 0);
 
-        let (cps, bad) = decode_utf8(&[0xC3, 0x41], PartialUtf8::default());
+        // The reference validates continuations only when resuming a partial
+        // sequence; a fresh sequence consumes the next byte as-is.
+        let (cps, partial) = decode_utf8(&[0xC3, 0x41], PartialUtf8::default());
+        assert_eq!(cps, vec![193, 0]);
+        assert_eq!(partial.n_remain, 0);
+
+        // Resuming a partial sequence with a non-continuation byte aborts.
+        let (cps, bad) = decode_utf8(&[0x41], PartialUtf8 { value: 3, n_remain: 1 });
         assert_eq!(cps, vec![0]);
         assert_eq!(bad.n_remain, -1);
     }
