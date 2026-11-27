@@ -410,8 +410,9 @@ macro_rules! impl_gguf_value {
                 }
 
                 fn decode(src: &[u8]) -> Self {
+                    let n = std::mem::size_of::<$t>();
                     let mut buf = [0u8; std::mem::size_of::<$t>()];
-                    buf.copy_from_slice(&src[..buf.len()]);
+                    buf.copy_from_slice(&src[..n]);
                     <$t>::from_ne_bytes(buf)
                 }
             }
@@ -757,7 +758,7 @@ where
     }
 
     pub fn read<T: GgufValue>(&mut self) -> Result<T> {
-        let mut buf = [0u8; std::mem::size_of::<T>()];
+        let mut buf = vec![0u8; std::mem::size_of::<T>()];
         self.read_bytes(&mut buf)?;
         Ok(T::decode(&buf))
     }
