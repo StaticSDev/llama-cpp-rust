@@ -7,7 +7,18 @@
 //! This is a dry port: modules are translated module by module, no build or
 //! runtime verification has been performed yet.
 
-pub mod core;
+pub mod arch;
+pub mod batch;
 pub mod cparams;
+pub mod chat;
+pub mod core;
+pub mod gguf;
+pub mod grammar;
+pub mod hparams;
 pub mod io;
+pub mod json;
+pub mod kv_cache;
 pub mod r#impl;
+pub mod sampler;
+pub mod unicode;
+pub mod vocab;
