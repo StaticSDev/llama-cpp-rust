@@ -780,15 +780,19 @@ pub struct KvCache {
     n_seq_max: SeqId,
     n_stream: SeqId,
     n_swa: u32,
+    #[allow(dead_code)]
     is_indexer: bool,
 
     n_rot_k: u32,
     n_rot_v: u32,
+    #[allow(dead_code)]
     n_embd_head_k_all: i32,
+    #[allow(dead_code)]
     n_embd_head_v_all: i32,
 
     attn_rot_hadamard: BTreeMap<i64, Vec<f32>>,
     attn_rot_bufs: Vec<MemoryBuf>,
+    #[allow(dead_code)]
     debug: i32,
     swa_type: SwaType,
 
