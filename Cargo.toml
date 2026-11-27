@@ -1,0 +1,12 @@
+[package]
+name = "llama-cpp-rust"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Rust port of llama.cpp (in progress)"
+repository = "https://github.com/StaticSDev/llama-cpp-rust"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
