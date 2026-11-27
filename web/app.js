@@ -7,7 +7,7 @@ const statusText = document.getElementById('status-text');
 const dot = document.getElementById('dot');
 const model = document.getElementById('model');
 
-const options = { n_predict: 64, temp: 0, top_p: 0.9 };
+const options = { n_predict: 256, temp: 0, top_p: 0.9 };
 
 let waiting = false;
 let ready = false;
@@ -19,6 +19,7 @@ function scrollToBottom() {
 function autoGrow() {
   textarea.style.height = 'auto';
   textarea.style.height = Math.min(textarea.scrollHeight, 140) + 'px';
+  messages.style.paddingBottom = form.offsetHeight + 32 + 'px';
 }
 
 function setWaiting(value) {
@@ -81,7 +82,10 @@ async function sendPrompt(prompt) {
     if (data.error) {
       throw new Error(data.error);
     }
-    addMessage('assistant', typeof data.text === 'string' ? data.text : '');
+    if (typeof data.text !== 'string' || !data.text.trim()) {
+      throw new Error('The model returned an empty reply.');
+    }
+    addMessage('assistant', data.text);
   } catch (error) {
     addMessage('assistant', error.message || 'Something went wrong.', true);
   } finally {
@@ -89,6 +93,7 @@ async function sendPrompt(prompt) {
     setWaiting(false);
     scrollToBottom();
     textarea.focus();
+    loadStatus();
   }
 }
 

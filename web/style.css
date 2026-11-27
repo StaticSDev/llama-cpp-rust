@@ -21,7 +21,9 @@ body {
 
 body {
   margin: 0;
-  background: var(--bg);
+  background:
+    radial-gradient(90% 55% at 50% 118%, rgba(255, 255, 255, .045), transparent 70%),
+    var(--bg);
   color: var(--text);
   font-family: var(--font);
   font-size: 15px;
@@ -171,7 +173,7 @@ body {
 .composer {
   position: absolute;
   right: 16px;
-  bottom: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom));
   left: 16px;
   display: flex;
   flex-direction: column;
@@ -296,7 +298,7 @@ button:disabled {
 
   .composer {
     right: 12px;
-    bottom: 12px;
+    bottom: calc(12px + env(safe-area-inset-bottom));
     left: 12px;
     padding: 12px;
   }
