@@ -25,6 +25,7 @@ pub mod memory;
 pub mod mmap;
 pub mod model;
 pub mod model_loader;
+pub mod model_saver;
 pub mod quant;
 pub mod runtime;
 pub mod r#impl;
