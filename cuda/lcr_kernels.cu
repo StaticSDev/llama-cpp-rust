@@ -1188,6 +1188,55 @@ __global__ void lcr_gdn_kernel(const float *q, const float *k, const float *v,
     }
 }
 
+// Stable softplus. The x <= 20 branch is exactly lcr_gate_kernel's expression;
+// above 20 the log1p term is below float precision, so the linear branch is
+// bit-identical and expf(x) can no longer overflow.
+__device__ __forceinline__ float lcr_softplus(float x) {
+    return x > 20.0f ? x : fmaxf(x, 0.0f) + log1pf(expf(-fabsf(x)));
+}
+
+// Fused gate/beta + GDN. Thread 0 computes the two head scalars from the raw
+// projections; the recurrence below is identical to lcr_gdn_kernel.
+__global__ void lcr_gdn_fused_kernel(const float *alpha, const float *bias,
+                                     const float *a, const float *beta_raw,
+                                     const float *q, const float *k, const float *v,
+                                     float *state, float *out, int n_k, int d) {
+    extern __shared__ float smem[];
+    const int h = blockIdx.x;
+    const int kh = h % n_k;
+    const int tid = threadIdx.x;
+    float *sk = smem;
+    float *sq = smem + d;
+    for (int t = tid; t < d; t += blockDim.x) {
+        sk[t] = k[(size_t)kh * d + t];
+        sq[t] = q[(size_t)kh * d + t];
+    }
+    if (tid == 0) {
+        const float gate = a[h] * lcr_softplus(alpha[h] + bias[h]);
+        smem[2 * d] = expf(gate);
+        smem[2 * d + 1] = 1.0f / (1.0f + expf(-beta_raw[h]));
+    }
+    __syncthreads();
+    const float decay = smem[2 * d];
+    const float b = smem[2 * d + 1];
+    const float inv = rsqrtf((float)d);
+    for (int j = tid; j < d; j += blockDim.x) {
+        float *row = state + (size_t)h * d * d + (size_t)j * d;
+        float kdot = 0.0f;
+        for (int t = 0; t < d; ++t) {
+            row[t] *= decay;
+            kdot += row[t] * sk[t];
+        }
+        const float delta = (v[(size_t)h * d + j] - kdot) * b;
+        float acc = 0.0f;
+        for (int t = 0; t < d; ++t) {
+            row[t] += delta * sk[t];
+            acc += row[t] * sq[t];
+        }
+        out[(size_t)h * d + j] = acc * inv;
+    }
+}
+
 __global__ void lcr_attn_store_kernel(const float *k, const float *v,
                                       float *kc, float *vc,
                                       int n_kv, int seq_cap, int seq_pos, int d) {
@@ -1664,6 +1713,29 @@ int lcr_op_gdn(void *ctx, const float *q, const float *k, const float *v,
     const size_t smem_bytes = (size_t)(2 * d + 2) * sizeof(float);
     lcr_gdn_kernel<<<n_v, LCR_BLOCK_SIZE, smem_bytes, c->stream>>>(
         q, k, v, gate, beta, state, out, n_k, d);
+    if (cudaGetLastError() != cudaSuccess) {
+        return LCR_ERR_CUDA;
+    }
+    return LCR_OK;
+}
+
+int lcr_op_gdn_fused(void *ctx,
+                     const float *alpha, const float *bias, const float *a,
+                     const float *beta_raw,
+                     const float *q, const float *k, const float *v,
+                     float *state, float *out,
+                     int n_v, int n_k, int d) {
+    if (!ctx || !alpha || !bias || !a || !beta_raw || !q || !k || !v ||
+        !state || !out || n_v <= 0 || n_k <= 0 || d <= 0 || n_v % n_k != 0) {
+        return LCR_ERR_ARG;
+    }
+    LcrContext *c = (LcrContext *)ctx;
+    if (cudaSetDevice(c->device) != cudaSuccess) {
+        return LCR_ERR_CUDA;
+    }
+    const size_t smem_bytes = (size_t)(2 * d + 2) * sizeof(float);
+    lcr_gdn_fused_kernel<<<n_v, LCR_BLOCK_SIZE, smem_bytes, c->stream>>>(
+        alpha, bias, a, beta_raw, q, k, v, state, out, n_k, d);
     if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }

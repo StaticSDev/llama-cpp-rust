@@ -162,7 +162,9 @@ unsafe extern "C" {
     fn lcr_op_add(ctx: *mut c_void, dst: *mut f32, src: *const f32, n: c_int) -> c_int;
     fn lcr_op_mul(ctx: *mut c_void, dst: *mut f32, src: *const f32, n: c_int) -> c_int;
     fn lcr_op_scale(ctx: *mut c_void, x: *mut f32, n: c_int, scale: f32) -> c_int;
+    #[allow(dead_code)]
     fn lcr_op_sigmoid(ctx: *mut c_void, x: *const f32, y: *mut f32, n: c_int) -> c_int;
+    #[allow(dead_code)]
     fn lcr_op_gate(
         ctx: *mut c_void,
         alpha: *const f32,
@@ -188,6 +190,7 @@ unsafe extern "C" {
         k: c_int,
         stride: c_int,
     ) -> c_int;
+    #[allow(dead_code)]
     fn lcr_op_gdn(
         ctx: *mut c_void,
         q: *const f32,
@@ -195,6 +198,22 @@ unsafe extern "C" {
         v: *const f32,
         gate: *const f32,
         beta: *const f32,
+        state: *mut f32,
+        out: *mut f32,
+        n_v: c_int,
+        n_k: c_int,
+        d: c_int,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn lcr_op_gdn_fused(
+        ctx: *mut c_void,
+        alpha: *const f32,
+        bias: *const f32,
+        a: *const f32,
+        beta_raw: *const f32,
+        q: *const f32,
+        k: *const f32,
+        v: *const f32,
         state: *mut f32,
         out: *mut f32,
         n_v: c_int,
@@ -646,11 +665,13 @@ impl CudaWeights {
         check_rc("lcr_op_scale", rc)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn op_sigmoid(&self, x: *const f32, y: *mut f32, n: c_int) -> Result<()> {
         let rc = unsafe { lcr_op_sigmoid(self.ctx, x, y, n) };
         check_rc("lcr_op_sigmoid", rc)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn op_gate(
         &self,
         alpha: *const f32,
@@ -688,6 +709,7 @@ impl CudaWeights {
         check_rc("lcr_op_conv_silu", rc)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn op_gdn(
         &self,
         q: *const f32,
@@ -703,6 +725,30 @@ impl CudaWeights {
     ) -> Result<()> {
         let rc = unsafe { lcr_op_gdn(self.ctx, q, k, v, gate, beta, state, out, n_v, n_k, d) };
         check_rc("lcr_op_gdn", rc)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn op_gdn_fused(
+        &self,
+        alpha: *const f32,
+        bias: *const f32,
+        a: *const f32,
+        beta_raw: *const f32,
+        q: *const f32,
+        k: *const f32,
+        v: *const f32,
+        state: *mut f32,
+        out: *mut f32,
+        n_v: c_int,
+        n_k: c_int,
+        d: c_int,
+    ) -> Result<()> {
+        let rc = unsafe {
+            lcr_op_gdn_fused(
+                self.ctx, alpha, bias, a, beta_raw, q, k, v, state, out, n_v, n_k, d,
+            )
+        };
+        check_rc("lcr_op_gdn_fused", rc)
     }
 
     pub(crate) fn op_attn(

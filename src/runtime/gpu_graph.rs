@@ -107,8 +107,6 @@ pub struct GpuWorkspace {
     z: *mut f32,
     beta_raw: *mut f32,
     alpha_raw: *mut f32,
-    beta: *mut f32,
-    gate: *mut f32,
     conv_out: *mut f32,
     gdn_out: *mut f32,
     heads: *mut f32,
@@ -259,8 +257,6 @@ impl GpuWorkspace {
         let z = alloc(value_dim, "z")?;
         let beta_raw = alloc(p.ssm_dt_rank, "beta_raw")?;
         let alpha_raw = alloc(p.ssm_dt_rank, "alpha_raw")?;
-        let beta = alloc(p.ssm_dt_rank, "beta")?;
-        let gate = alloc(p.ssm_dt_rank, "gate")?;
         let conv_out = alloc(channels, "conv_out")?;
         let gdn_out = alloc(value_dim, "gdn_out")?;
         let heads = alloc(nhd, "heads")?;
@@ -397,8 +393,6 @@ impl GpuWorkspace {
             z,
             beta_raw,
             alpha_raw,
-            beta,
-            gate,
             conv_out,
             gdn_out,
             heads,
@@ -480,14 +474,6 @@ impl GpuWorkspace {
                     self.beta_raw,
                     self.alpha_raw,
                 )?;
-                cuda.op_gate(
-                    self.alpha_raw,
-                    r.dt_bias.cast::<f32>(),
-                    r.a.cast::<f32>(),
-                    self.gate,
-                    d.nv,
-                )?;
-                cuda.op_sigmoid(self.beta_raw, self.beta, d.nv)?;
 
                 let hist_cur = state.hist[state.cur].cast::<f32>();
                 cuda.op_conv_silu(
@@ -520,12 +506,14 @@ impl GpuWorkspace {
                 }
 
                 cuda.op_l2norm_heads(self.conv_out, 2 * d.nk, d.ds, self.eps)?;
-                cuda.op_gdn(
+                cuda.op_gdn_fused(
+                    self.alpha_raw,
+                    r.dt_bias.cast::<f32>(),
+                    r.a.cast::<f32>(),
+                    self.beta_raw,
                     self.conv_out,
                     self.conv_out.wrapping_add(d.key_dim as usize),
                     self.conv_out.wrapping_add((2 * d.key_dim) as usize),
-                    self.gate,
-                    self.beta,
                     state.state.cast::<f32>(),
                     self.gdn_out,
                     d.nv,
@@ -746,14 +734,6 @@ impl GpuWorkspace {
                             .ok_or_else(|| Error::new("missing recurrent GPU layer"))?;
                         let state = &mut self.rec_states[li];
                         cuda.matvec2(r.beta, r.alpha, norm_i, self.beta_raw, self.alpha_raw)?;
-                        cuda.op_gate(
-                            self.alpha_raw,
-                            r.dt_bias.cast::<f32>(),
-                            r.a.cast::<f32>(),
-                            self.gate,
-                            d.nv,
-                        )?;
-                        cuda.op_sigmoid(self.beta_raw, self.beta, d.nv)?;
 
                         let qkv_i = self.batch_qkv.wrapping_add(t * qkv_stride);
                         let gdn_i = self.batch_gdn.wrapping_add(t * value_dim);
@@ -789,12 +769,14 @@ impl GpuWorkspace {
                         }
 
                         cuda.op_l2norm_heads(self.conv_out, 2 * d.nk, d.ds, self.eps)?;
-                        cuda.op_gdn(
+                        cuda.op_gdn_fused(
+                            self.alpha_raw,
+                            r.dt_bias.cast::<f32>(),
+                            r.a.cast::<f32>(),
+                            self.beta_raw,
                             self.conv_out,
                             self.conv_out.wrapping_add(d.key_dim as usize),
                             self.conv_out.wrapping_add((2 * d.key_dim) as usize),
-                            self.gate,
-                            self.beta,
                             state.state.cast::<f32>(),
                             gdn_i,
                             d.nv,

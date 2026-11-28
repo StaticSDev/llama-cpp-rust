@@ -64,6 +64,14 @@ int lcr_op_conv_silu(void *ctx, const float *w, const float *hist, const float *
 int lcr_op_gdn(void *ctx, const float *q, const float *k, const float *v,
                const float *gate, const float *beta, float *state, float *out,
                int n_v, int n_k, int d);
+/* Same recurrence as lcr_op_gdn, but computes gate[h] and beta[h] from the
+ * raw projections internally, replacing a separate gate and sigmoid launch. */
+int lcr_op_gdn_fused(void *ctx,
+                     const float *alpha, const float *bias, const float *a,
+                     const float *beta_raw,
+                     const float *q, const float *k, const float *v,
+                     float *state, float *out,
+                     int n_v, int n_k, int d);
 int lcr_op_attn(void *ctx, const float *q, const float *k, const float *v,
                 const float *g, float *kc, float *vc, float *out,
                 int n_heads, int n_kv, int d, int seq_pos, int seq_cap, float scale);
