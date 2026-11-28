@@ -97,10 +97,9 @@ warp-per-row vectorized dequant, grouped matvecs, 16-token batched prefill with
 weight reuse, fused GDN/residual/norm kernels, and one stream sync per token.
 Upstream still wins with fused MMQ kernels and better memory throughput.
 
-Parity `bench/parity_check.py` compares greedy outputs on 8 prompts: 7 match,
-one code-style prompt still diverges in the thinking block because of different
-f32 reduction order. Raw data: [bench/latency.json](bench/latency.json) and
-other `bench/latency_*.json` files.
+Parity `bench/parity_check.py` compares greedy outputs on 8 prompts: all match
+after the prefill chunk-position fix. Raw data: [bench/latency.json](bench/latency.json)
+and other `bench/latency_*.json` files.
 
 Reproduce:
 
