@@ -469,10 +469,17 @@ impl GpuWorkspace {
                     .as_ref()
                     .ok_or_else(|| Error::new("missing recurrent GPU layer"))?;
                 let state = &mut self.rec_states[li];
-                cuda.matvec_device(r.qkv, self.norm, self.qkv)?;
-                cuda.matvec_device(r.z, self.norm, self.z)?;
-                cuda.matvec_device(r.beta, self.norm, self.beta_raw)?;
-                cuda.matvec_device(r.alpha, self.norm, self.alpha_raw)?;
+                cuda.matvec4(
+                    r.qkv,
+                    r.z,
+                    r.beta,
+                    r.alpha,
+                    self.norm,
+                    self.qkv,
+                    self.z,
+                    self.beta_raw,
+                    self.alpha_raw,
+                )?;
                 cuda.op_gate(
                     self.alpha_raw,
                     r.dt_bias.cast::<f32>(),
@@ -542,7 +549,7 @@ impl GpuWorkspace {
                     .as_ref()
                     .ok_or_else(|| Error::new("missing full-attention GPU layer"))?;
                 let state = &self.full_states[fi];
-                cuda.matvec_device(f.q, self.norm, self.qkv)?;
+                cuda.matvec3(f.q, f.k, f.v, self.norm, self.qkv, self.head_k, self.head_v)?;
                 cuda.zero(self.heads.cast::<c_void>(), d.head_bytes)?;
                 cuda.zero(self.gates.cast::<c_void>(), d.head_bytes)?;
                 cuda.op_split_qg(self.qkv, self.heads, self.gates, d.n_head, d.hd)?;
@@ -555,8 +562,6 @@ impl GpuWorkspace {
                     self.rope_base,
                     pos as i32,
                 )?;
-                cuda.matvec_device(f.k, self.norm, self.head_k)?;
-                cuda.matvec_device(f.v, self.norm, self.head_v)?;
                 cuda.op_qk_norm_rope(
                     self.head_k,
                     f.k_norm.cast::<f32>(),
@@ -593,8 +598,13 @@ impl GpuWorkspace {
                 d.n_embd,
                 self.eps,
             )?;
-            cuda.matvec_device(layer.common.up, self.norm2, self.up)?;
-            cuda.matvec_device(layer.common.gate, self.norm2, self.gate_ffn)?;
+            cuda.matvec2(
+                layer.common.up,
+                layer.common.gate,
+                self.norm2,
+                self.up,
+                self.gate_ffn,
+            )?;
             cuda.op_silu_mul(self.gate_ffn, self.up, self.up, d.n_ff)?;
             cuda.matvec_device(layer.common.down, self.up, self.ffn)?;
             cuda.op_add(self.x, self.ffn, d.n_embd)?;
@@ -735,8 +745,7 @@ impl GpuWorkspace {
                             .as_ref()
                             .ok_or_else(|| Error::new("missing recurrent GPU layer"))?;
                         let state = &mut self.rec_states[li];
-                        cuda.matvec_device(r.beta, norm_i, self.beta_raw)?;
-                        cuda.matvec_device(r.alpha, norm_i, self.alpha_raw)?;
+                        cuda.matvec2(r.beta, r.alpha, norm_i, self.beta_raw, self.alpha_raw)?;
                         cuda.op_gate(
                             self.alpha_raw,
                             r.dt_bias.cast::<f32>(),

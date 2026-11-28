@@ -40,6 +40,38 @@ unsafe extern "C" {
     fn lcr_gpu_row_device(ctx: *mut c_void, index: c_int, row: c_int, dst: *mut f32) -> c_int;
     fn lcr_gpu_matvec_device(ctx: *mut c_void, index: c_int, x: *const f32, out: *mut f32)
         -> c_int;
+    fn lcr_gpu_matvec2(
+        ctx: *mut c_void,
+        i0: c_int,
+        i1: c_int,
+        x: *const f32,
+        o0: *mut f32,
+        o1: *mut f32,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn lcr_gpu_matvec3(
+        ctx: *mut c_void,
+        i0: c_int,
+        i1: c_int,
+        i2: c_int,
+        x: *const f32,
+        o0: *mut f32,
+        o1: *mut f32,
+        o2: *mut f32,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn lcr_gpu_matvec4(
+        ctx: *mut c_void,
+        i0: c_int,
+        i1: c_int,
+        i2: c_int,
+        i3: c_int,
+        x: *const f32,
+        o0: *mut f32,
+        o1: *mut f32,
+        o2: *mut f32,
+        o3: *mut f32,
+    ) -> c_int;
     fn lcr_batch_matmul(
         ctx: *mut c_void,
         index: c_int,
@@ -409,6 +441,50 @@ impl CudaWeights {
     pub(crate) fn matvec_device(&self, index: c_int, x: *const f32, out: *mut f32) -> Result<()> {
         let rc = unsafe { lcr_gpu_matvec_device(self.ctx, index, x, out) };
         check_rc("lcr_gpu_matvec_device", rc)
+    }
+
+    pub(crate) fn matvec2(
+        &self,
+        i0: c_int,
+        i1: c_int,
+        x: *const f32,
+        o0: *mut f32,
+        o1: *mut f32,
+    ) -> Result<()> {
+        let rc = unsafe { lcr_gpu_matvec2(self.ctx, i0, i1, x, o0, o1) };
+        check_rc("lcr_gpu_matvec2", rc)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn matvec3(
+        &self,
+        i0: c_int,
+        i1: c_int,
+        i2: c_int,
+        x: *const f32,
+        o0: *mut f32,
+        o1: *mut f32,
+        o2: *mut f32,
+    ) -> Result<()> {
+        let rc = unsafe { lcr_gpu_matvec3(self.ctx, i0, i1, i2, x, o0, o1, o2) };
+        check_rc("lcr_gpu_matvec3", rc)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn matvec4(
+        &self,
+        i0: c_int,
+        i1: c_int,
+        i2: c_int,
+        i3: c_int,
+        x: *const f32,
+        o0: *mut f32,
+        o1: *mut f32,
+        o2: *mut f32,
+        o3: *mut f32,
+    ) -> Result<()> {
+        let rc = unsafe { lcr_gpu_matvec4(self.ctx, i0, i1, i2, i3, x, o0, o1, o2, o3) };
+        check_rc("lcr_gpu_matvec4", rc)
     }
 
     /// Async batched matmul: `out[t * out_stride + r] = W[index][r] dot x[t * x_stride]`.

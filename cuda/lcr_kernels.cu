@@ -189,16 +189,10 @@ __device__ __forceinline__ bool lcr_vec_ok(const void *w, const void *x, int ali
            ((uintptr_t)x & (align - 1)) == 0;
 }
 
-__global__ void lcr_matvec_f32(const uint8_t * __restrict__ blob, int in,
-                               const float * __restrict__ x,
-                               float * __restrict__ out, int64_t offset,
-                               size_t row_bytes, unsigned int nrows) {
-    const int lane = threadIdx.x & 31;
-    const int wid = threadIdx.x >> 5;
-    const int row = blockIdx.x * (LCR_MV_BLOCK / 32) + wid;
-    if (row >= (int)nrows) return;
-    const float * __restrict__ w =
-        (const float *)(blob + offset + (size_t)row * row_bytes);
+__device__ __forceinline__ float lcr_mv_f32(const uint8_t * __restrict__ row,
+                                            int in, const float * __restrict__ x,
+                                            int lane) {
+    const float * __restrict__ w = (const float *)row;
     float sum = 0.0f;
     if (((in & 3) == 0) && lcr_vec_ok(w, x, 16)) {
         for (int n = lane * 4; n + 4 <= in; n += 32 * 4) {
@@ -211,10 +205,10 @@ __global__ void lcr_matvec_f32(const uint8_t * __restrict__ blob, int in,
             sum += __ldg(w + n) * __ldg(x + n);
         }
     }
-    lcr_matvec_reduce(sum, out, row);
+    return sum;
 }
 
-__global__ void lcr_matvec_f16(const uint8_t * __restrict__ blob, int in,
+__global__ void lcr_matvec_f32(const uint8_t * __restrict__ blob, int in,
                                const float * __restrict__ x,
                                float * __restrict__ out, int64_t offset,
                                size_t row_bytes, unsigned int nrows) {
@@ -222,8 +216,14 @@ __global__ void lcr_matvec_f16(const uint8_t * __restrict__ blob, int in,
     const int wid = threadIdx.x >> 5;
     const int row = blockIdx.x * (LCR_MV_BLOCK / 32) + wid;
     if (row >= (int)nrows) return;
-    const uint16_t * __restrict__ w =
-        (const uint16_t *)(blob + offset + (size_t)row * row_bytes);
+    float sum = lcr_mv_f32(blob + offset + (size_t)row * row_bytes, in, x, lane);
+    lcr_matvec_reduce(sum, out, row);
+}
+
+__device__ __forceinline__ float lcr_mv_f16(const uint8_t * __restrict__ row,
+                                            int in, const float * __restrict__ x,
+                                            int lane) {
+    const uint16_t * __restrict__ w = (const uint16_t *)row;
     float sum = 0.0f;
     if (((in & 3) == 0) && lcr_vec_ok(w, x, 8)) {
         for (int n = lane * 4; n + 4 <= in; n += 32 * 4) {
@@ -239,19 +239,25 @@ __global__ void lcr_matvec_f16(const uint8_t * __restrict__ blob, int in,
             sum += lcr_half2float(__ldg(w + n)) * __ldg(x + n);
         }
     }
-    lcr_matvec_reduce(sum, out, row);
+    return sum;
 }
 
-__global__ void lcr_matvec_bf16(const uint8_t * __restrict__ blob, int in,
-                                const float * __restrict__ x,
-                                float * __restrict__ out, int64_t offset,
-                                size_t row_bytes, unsigned int nrows) {
+__global__ void lcr_matvec_f16(const uint8_t * __restrict__ blob, int in,
+                               const float * __restrict__ x,
+                               float * __restrict__ out, int64_t offset,
+                               size_t row_bytes, unsigned int nrows) {
     const int lane = threadIdx.x & 31;
     const int wid = threadIdx.x >> 5;
     const int row = blockIdx.x * (LCR_MV_BLOCK / 32) + wid;
     if (row >= (int)nrows) return;
-    const uint16_t * __restrict__ w =
-        (const uint16_t *)(blob + offset + (size_t)row * row_bytes);
+    float sum = lcr_mv_f16(blob + offset + (size_t)row * row_bytes, in, x, lane);
+    lcr_matvec_reduce(sum, out, row);
+}
+
+__device__ __forceinline__ float lcr_mv_bf16(const uint8_t * __restrict__ row,
+                                             int in, const float * __restrict__ x,
+                                             int lane) {
+    const uint16_t * __restrict__ w = (const uint16_t *)row;
     float sum = 0.0f;
     if (((in & 3) == 0) && lcr_vec_ok(w, x, 8)) {
         for (int n = lane * 4; n + 4 <= in; n += 32 * 4) {
@@ -267,10 +273,10 @@ __global__ void lcr_matvec_bf16(const uint8_t * __restrict__ blob, int in,
             sum += lcr_bf162float(__ldg(w + n)) * __ldg(x + n);
         }
     }
-    lcr_matvec_reduce(sum, out, row);
+    return sum;
 }
 
-__global__ void lcr_matvec_q8_0(const uint8_t * __restrict__ blob, int in,
+__global__ void lcr_matvec_bf16(const uint8_t * __restrict__ blob, int in,
                                 const float * __restrict__ x,
                                 float * __restrict__ out, int64_t offset,
                                 size_t row_bytes, unsigned int nrows) {
@@ -278,7 +284,14 @@ __global__ void lcr_matvec_q8_0(const uint8_t * __restrict__ blob, int in,
     const int wid = threadIdx.x >> 5;
     const int row = blockIdx.x * (LCR_MV_BLOCK / 32) + wid;
     if (row >= (int)nrows) return;
-    const uint8_t * __restrict__ w = blob + offset + (size_t)row * row_bytes;
+    float sum = lcr_mv_bf16(blob + offset + (size_t)row * row_bytes, in, x, lane);
+    lcr_matvec_reduce(sum, out, row);
+}
+
+__device__ __forceinline__ float lcr_mv_q8_0(const uint8_t * __restrict__ row,
+                                             int in, const float * __restrict__ x,
+                                             int lane) {
+    const uint8_t * __restrict__ w = row;
     const int blocks = in >> 5;
     float sum = 0.0f;
     for (int b = 0; b < blocks; ++b) {
@@ -292,13 +305,10 @@ __global__ void lcr_matvec_q8_0(const uint8_t * __restrict__ blob, int in,
         const int q = (int)__ldg(&blk->qs[lane]);
         sum += ((float)q * d) * __ldg(x + (size_t)b * 32 + lane);
     }
-    lcr_matvec_reduce(sum, out, row);
+    return sum;
 }
 
-// One warp owns one output row. Each lane walks the eight 32-element
-// subgroups of every 256-element quant block, so each packed byte is read
-// once and a scale/min pair is computed once per subgroup.
-__global__ void lcr_matvec_q4_k(const uint8_t * __restrict__ blob, int in,
+__global__ void lcr_matvec_q8_0(const uint8_t * __restrict__ blob, int in,
                                 const float * __restrict__ x,
                                 float * __restrict__ out, int64_t offset,
                                 size_t row_bytes, unsigned int nrows) {
@@ -306,7 +316,17 @@ __global__ void lcr_matvec_q4_k(const uint8_t * __restrict__ blob, int in,
     const int wid = threadIdx.x >> 5;
     const int row = blockIdx.x * (LCR_MV_BLOCK / 32) + wid;
     if (row >= (int)nrows) return;
-    const uint8_t * __restrict__ w = blob + offset + (size_t)row * row_bytes;
+    float sum = lcr_mv_q8_0(blob + offset + (size_t)row * row_bytes, in, x, lane);
+    lcr_matvec_reduce(sum, out, row);
+}
+
+// One warp owns one output row. Each lane walks the eight 32-element
+// subgroups of every 256-element quant block, so each packed byte is read
+// once and a scale/min pair is computed once per subgroup.
+__device__ __forceinline__ float lcr_mv_q4_k(const uint8_t * __restrict__ row,
+                                             int in, const float * __restrict__ x,
+                                             int lane) {
+    const uint8_t * __restrict__ w = row;
     const int blocks = in >> 8;
     const bool vx = (((uintptr_t)x) & 15) == 0;
     float sum = 0.0f;
@@ -368,10 +388,10 @@ __global__ void lcr_matvec_q4_k(const uint8_t * __restrict__ blob, int in,
         }
         sum += acc;
     }
-    lcr_matvec_reduce(sum, out, row);
+    return sum;
 }
 
-__global__ void lcr_matvec_q5_k(const uint8_t * __restrict__ blob, int in,
+__global__ void lcr_matvec_q4_k(const uint8_t * __restrict__ blob, int in,
                                 const float * __restrict__ x,
                                 float * __restrict__ out, int64_t offset,
                                 size_t row_bytes, unsigned int nrows) {
@@ -379,7 +399,14 @@ __global__ void lcr_matvec_q5_k(const uint8_t * __restrict__ blob, int in,
     const int wid = threadIdx.x >> 5;
     const int row = blockIdx.x * (LCR_MV_BLOCK / 32) + wid;
     if (row >= (int)nrows) return;
-    const uint8_t * __restrict__ w = blob + offset + (size_t)row * row_bytes;
+    float sum = lcr_mv_q4_k(blob + offset + (size_t)row * row_bytes, in, x, lane);
+    lcr_matvec_reduce(sum, out, row);
+}
+
+__device__ __forceinline__ float lcr_mv_q5_k(const uint8_t * __restrict__ row,
+                                             int in, const float * __restrict__ x,
+                                             int lane) {
+    const uint8_t * __restrict__ w = row;
     const int blocks = in >> 8;
     const bool vx = (((uintptr_t)x) & 15) == 0;
     float sum = 0.0f;
@@ -443,10 +470,10 @@ __global__ void lcr_matvec_q5_k(const uint8_t * __restrict__ blob, int in,
         }
         sum += acc;
     }
-    lcr_matvec_reduce(sum, out, row);
+    return sum;
 }
 
-__global__ void lcr_matvec_q6_k(const uint8_t * __restrict__ blob, int in,
+__global__ void lcr_matvec_q5_k(const uint8_t * __restrict__ blob, int in,
                                 const float * __restrict__ x,
                                 float * __restrict__ out, int64_t offset,
                                 size_t row_bytes, unsigned int nrows) {
@@ -454,7 +481,14 @@ __global__ void lcr_matvec_q6_k(const uint8_t * __restrict__ blob, int in,
     const int wid = threadIdx.x >> 5;
     const int row = blockIdx.x * (LCR_MV_BLOCK / 32) + wid;
     if (row >= (int)nrows) return;
-    const uint8_t * __restrict__ w = blob + offset + (size_t)row * row_bytes;
+    float sum = lcr_mv_q5_k(blob + offset + (size_t)row * row_bytes, in, x, lane);
+    lcr_matvec_reduce(sum, out, row);
+}
+
+__device__ __forceinline__ float lcr_mv_q6_k(const uint8_t * __restrict__ row,
+                                             int in, const float * __restrict__ x,
+                                             int lane) {
+    const uint8_t * __restrict__ w = row;
     const int blocks = in >> 8;
     const bool vx = (((uintptr_t)x) & 15) == 0;
     float sum = 0.0f;
@@ -524,6 +558,18 @@ __global__ void lcr_matvec_q6_k(const uint8_t * __restrict__ blob, int in,
         }
         sum += acc;
     }
+    return sum;
+}
+
+__global__ void lcr_matvec_q6_k(const uint8_t * __restrict__ blob, int in,
+                                const float * __restrict__ x,
+                                float * __restrict__ out, int64_t offset,
+                                size_t row_bytes, unsigned int nrows) {
+    const int lane = threadIdx.x & 31;
+    const int wid = threadIdx.x >> 5;
+    const int row = blockIdx.x * (LCR_MV_BLOCK / 32) + wid;
+    if (row >= (int)nrows) return;
+    float sum = lcr_mv_q6_k(blob + offset + (size_t)row * row_bytes, in, x, lane);
     lcr_matvec_reduce(sum, out, row);
 }
 
@@ -563,11 +609,12 @@ struct LcrContext {
     float *d_x;
     float *d_y;
     LcrWeightMeta *metas;
+    LcrWeightMeta *d_metas; /* device copy used by the grouped matvec kernels */
     int count;
 };
 
 // GGML row size: bytes = in / block_size * block_bytes.
-static int lcr_row_bytes(int type, int64_t in, size_t *out) {
+__host__ __device__ __forceinline__ static int lcr_row_bytes(int type, int64_t in, size_t *out) {
     int bs;
     size_t bb;
     switch (type) {
@@ -587,12 +634,117 @@ static int lcr_row_bytes(int type, int64_t in, size_t *out) {
     return LCR_OK;
 }
 
+// --- grouped matvec: 2/3/4 weights sharing one activation, one launch -------
+// Metadata lives in c->d_metas (device mirror of c->metas). Each CTA in the
+// y dimension handles one selected weight; x covers rows of the largest
+// selected weight, and CTAs past a weight's out feature count exit at once.
+template <int N>
+struct LcrGroupArgs {
+    int idx[N];
+    float *out[N];
+};
+
+__device__ __forceinline__ float lcr_mv_core(int type, const uint8_t *row, int in,
+                                             const float *x, int lane) {
+    switch (type) {
+    case LCR_F32:  return lcr_mv_f32(row, in, x, lane);
+    case LCR_F16:  return lcr_mv_f16(row, in, x, lane);
+    case LCR_Q8_0: return lcr_mv_q8_0(row, in, x, lane);
+    case LCR_Q4_K: return lcr_mv_q4_k(row, in, x, lane);
+    case LCR_Q5_K: return lcr_mv_q5_k(row, in, x, lane);
+    case LCR_Q6_K: return lcr_mv_q6_k(row, in, x, lane);
+    case LCR_BF16: return lcr_mv_bf16(row, in, x, lane);
+    default:       return 0.0f;
+    }
+}
+
+template <int N>
+__global__ void lcr_group_matvec_kernel(const uint8_t * __restrict__ blob,
+                                        const LcrWeightMeta * __restrict__ metas,
+                                        const float * __restrict__ x,
+                                        LcrGroupArgs<N> args) {
+    const int lane = threadIdx.x & 31;
+    const int wid = threadIdx.x >> 5;
+    const int slot = blockIdx.y;
+    const LcrWeightMeta m = metas[args.idx[slot]];
+    const int row = blockIdx.x * (LCR_MV_BLOCK / 32) + wid;
+    if (row >= (int)m.out) return;
+    size_t rb = 0;
+    if (lcr_row_bytes(m.type, m.in, &rb) != LCR_OK) return;
+    const float sum = lcr_mv_core(m.type, blob + m.offset + (size_t)row * rb,
+                                  (int)m.in, x, lane);
+    lcr_matvec_reduce(sum, args.out[slot], row);
+}
+
+template <int N>
+static int lcr_matvec_group(void *ctx, const int *indices, const float *x,
+                            float * const *outs) {
+    if (!ctx || !x || !outs) {
+        return LCR_ERR_ARG;
+    }
+    LcrContext *c = (LcrContext *)ctx;
+    if (!c->d_blob || !c->d_metas) {
+        return LCR_ERR_RANGE;
+    }
+    LcrGroupArgs<N> args;
+    int max_rows = 0;
+    for (int j = 0; j < N; ++j) {
+        const int index = indices[j];
+        if (index < 0 || index >= c->count || !outs[j]) {
+            return LCR_ERR_RANGE;
+        }
+        const LcrWeightMeta *m = &c->metas[index];
+        size_t rb;
+        const int rc = lcr_row_bytes(m->type, m->in, &rb);
+        if (rc != LCR_OK) {
+            return rc;
+        }
+        if ((int)m->out > max_rows) {
+            max_rows = (int)m->out;
+        }
+        args.idx[j] = index;
+        args.out[j] = outs[j];
+    }
+    if (max_rows <= 0) {
+        return LCR_ERR_ARG;
+    }
+    if (cudaSetDevice(c->device) != cudaSuccess) {
+        return LCR_ERR_CUDA;
+    }
+    const dim3 grid((max_rows + LCR_MV_BLOCK / 32 - 1) / (LCR_MV_BLOCK / 32), N);
+    lcr_group_matvec_kernel<N><<<grid, LCR_MV_BLOCK, 0, c->stream>>>(
+        (const uint8_t *)c->d_blob, c->d_metas, x, args);
+    return cudaGetLastError() == cudaSuccess ? LCR_OK : LCR_ERR_CUDA;
+}
+
+int lcr_gpu_matvec2(void *ctx, int i0, int i1, const float *x,
+                    float *o0, float *o1) {
+    const int idx[2] = {i0, i1};
+    float *outs[2] = {o0, o1};
+    return lcr_matvec_group<2>(ctx, idx, x, outs);
+}
+
+int lcr_gpu_matvec3(void *ctx, int i0, int i1, int i2, const float *x,
+                    float *o0, float *o1, float *o2) {
+    const int idx[3] = {i0, i1, i2};
+    float *outs[3] = {o0, o1, o2};
+    return lcr_matvec_group<3>(ctx, idx, x, outs);
+}
+
+int lcr_gpu_matvec4(void *ctx, int i0, int i1, int i2, int i3, const float *x,
+                    float *o0, float *o1, float *o2, float *o3) {
+    const int idx[4] = {i0, i1, i2, i3};
+    float *outs[4] = {o0, o1, o2, o3};
+    return lcr_matvec_group<4>(ctx, idx, x, outs);
+}
+
 static void lcr_release_device(LcrContext *c) {
     if (c->d_blob) { cudaFree(c->d_blob); c->d_blob = NULL; }
     if (c->d_x)    { cudaFree(c->d_x);    c->d_x = NULL; }
     if (c->d_y)    { cudaFree(c->d_y);    c->d_y = NULL; }
     free(c->metas);
     c->metas = NULL;
+    if (c->d_metas) { cudaFree(c->d_metas); c->d_metas = NULL; }
     c->count = 0;
 }
 
@@ -687,19 +839,25 @@ int lcr_gpu_upload(void *ctx, const void *blob, size_t bytes,
     void *d_blob = NULL;
     float *d_x = NULL;
     float *d_y = NULL;
+    LcrWeightMeta *d_metas = NULL;
     if (cudaMalloc(&d_blob, bytes) != cudaSuccess ||
         cudaMalloc(&d_x, max_in * sizeof(float)) != cudaSuccess ||
-        cudaMalloc(&d_y, max_in * sizeof(float)) != cudaSuccess) {
+        cudaMalloc(&d_y, max_in * sizeof(float)) != cudaSuccess ||
+        cudaMalloc(&d_metas, (size_t)count * sizeof(LcrWeightMeta)) != cudaSuccess) {
         if (d_blob) cudaFree(d_blob);
         if (d_x) cudaFree(d_x);
         if (d_y) cudaFree(d_y);
+        if (d_metas) cudaFree(d_metas);
         free(host_metas);
         return LCR_ERR_CUDA;
     }
-    if (cudaMemcpyAsync(d_blob, blob, bytes, cudaMemcpyHostToDevice, c->stream) != cudaSuccess) {
+    if (cudaMemcpyAsync(d_blob, blob, bytes, cudaMemcpyHostToDevice, c->stream) != cudaSuccess ||
+        cudaMemcpyAsync(d_metas, host_metas, (size_t)count * sizeof(LcrWeightMeta),
+                        cudaMemcpyHostToDevice, c->stream) != cudaSuccess) {
         cudaFree(d_blob);
         cudaFree(d_x);
         cudaFree(d_y);
+        cudaFree(d_metas);
         free(host_metas);
         return LCR_ERR_CUDA;
     }
@@ -709,6 +867,7 @@ int lcr_gpu_upload(void *ctx, const void *blob, size_t bytes,
     c->d_x = d_x;
     c->d_y = d_y;
     c->metas = host_metas;
+    c->d_metas = d_metas;
     c->count = count;
     return LCR_OK;
 }

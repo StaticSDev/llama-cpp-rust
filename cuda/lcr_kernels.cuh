@@ -30,6 +30,15 @@ int  lcr_gpu_sync(void *ctx);
 int  lcr_gpu_zero(void *ctx, void *ptr, size_t bytes);
 int  lcr_gpu_row_device(void *ctx, int index, int row, float *dst);
 int  lcr_gpu_matvec_device(void *ctx, int index, const float *x, float *out);
+/* Grouped matvecs: N weights share one device activation. All arguments are
+ * device pointers; each call launches on the context stream and returns
+ * without synchronizing. */
+int  lcr_gpu_matvec2(void *ctx, int i0, int i1, const float *x,
+                     float *o0, float *o1);
+int  lcr_gpu_matvec3(void *ctx, int i0, int i1, int i2, const float *x,
+                     float *o0, float *o1, float *o2);
+int  lcr_gpu_matvec4(void *ctx, int i0, int i1, int i2, int i3, const float *x,
+                     float *o0, float *o1, float *o2, float *o3);
 int  lcr_gpu_read_i32(void *ctx, const void *src, int *dst);
 
 /* Device scratch allocation and direct access to the uploaded blob. */
