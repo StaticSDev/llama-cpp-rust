@@ -12,7 +12,7 @@ use crate::gguf::{
     ggml_blck_size, ggml_nbytes, ggml_type_size, gguf_add_tensor, gguf_find_tensor,
     gguf_init_empty, gguf_set_arr_data, gguf_set_arr_str, gguf_set_val_bool, gguf_set_val_f32,
     gguf_set_val_i32, gguf_set_val_i64, gguf_set_val_str, gguf_set_val_u32, gguf_set_val_u64,
-    gguf_write_out, GgmlTensor, GgmlType, GgufContext, GgufType, GgufValue, GgufWriterFile,
+    gguf_write_out, GgmlTensor, GgmlType, GgufContext, GgufValue, GgufWriterFile,
     GGML_MAX_DIMS, GGML_MAX_NAME, GGUF_KEY_GENERAL_ALIGNMENT,
 };
 
