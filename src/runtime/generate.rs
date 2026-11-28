@@ -93,6 +93,13 @@ pub fn generate_stream<F: FnMut(Event)>(
         ));
     }
 
+    #[cfg(feature = "cuda")]
+    {
+        if let Some(graph) = w.gpu_graph_lock() {
+            graph.reset()?;
+        }
+    }
+
     let formatted = format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
     let prompt_tokens = w.vocab.tokenize(&formatted, true, true);
     let mut st = ModelState::new(w);

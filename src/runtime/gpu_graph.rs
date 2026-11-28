@@ -137,6 +137,9 @@ pub struct GpuWorkspace {
     batch_gate_ffn: *mut f32,
     batch_ffn: *mut f32,
     layers: Vec<LayerIdx>,
+    hist_bytes: usize,
+    state_bytes: usize,
+    kvc_bytes: usize,
     rec_states: Vec<RecState>,
     full_states: Vec<FullState>,
 }
@@ -422,9 +425,29 @@ impl GpuWorkspace {
             batch_gate_ffn,
             batch_ffn,
             layers,
+            hist_bytes,
+            state_bytes: state_floats * std::mem::size_of::<f32>(),
+            kvc_bytes: kvc_floats * std::mem::size_of::<f32>(),
             rec_states,
             full_states,
         })
+    }
+
+    /// Clear all recurrent state and KV caches before a new conversation turn.
+    pub fn reset(&self) -> Result<()> {
+        for state in &self.rec_states {
+            for hist in state.hist {
+                if !hist.is_null() {
+                    self.cuda.zero(hist, self.hist_bytes)?;
+                }
+            }
+            self.cuda.zero(state.state, self.state_bytes)?;
+        }
+        for state in &self.full_states {
+            self.cuda.zero(state.kc, self.kvc_bytes)?;
+            self.cuda.zero(state.vc, self.kvc_bytes)?;
+        }
+        Ok(())
     }
 
     pub fn forward_token(&mut self, w: &Weights, token: i32, pos: usize) -> Result<i32> {
