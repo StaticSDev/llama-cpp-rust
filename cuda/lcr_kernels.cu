@@ -702,9 +702,9 @@ __global__ void lcr_attn_kernel(const float *q, const float *g,
         s = s * alpha + p;
         m = m_new;
     }
-    const float gate = 1.0f / (1.0f + expf(-g[h]));
     const float inv = 1.0f / s;
     for (int j = tid; j < d; j += LCR_BLOCK_SIZE) {
+        const float gate = 1.0f / (1.0f + expf(-g[(size_t)h * d + j]));
         out[(size_t)h * d + j] = acc[j] * inv * gate;
     }
 }

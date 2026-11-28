@@ -155,12 +155,6 @@ impl GpuWorkspace {
         let nhd = checked_mul(p.n_head, p.head_dim, "q head elements")?;
         let qg_dim = checked_mul(nhd, 2, "q plus gate elements")?;
         let kv_dim = checked_mul(p.n_head_kv, p.head_dim, "kv head elements")?;
-        if p.n_embd != nhd {
-            return Err(Error::new(format!(
-                "embedding {} does not match {} heads x {} head_dim",
-                p.n_embd, p.n_head, p.head_dim
-            )));
-        }
         let key_dim = checked_mul(p.ssm_state, p.ssm_group, "ssm key dim")?;
         let value_dim = checked_mul(p.ssm_state, p.ssm_dt_rank, "ssm value dim")?;
         let channels = checked_mul(key_dim, 2, "ssm key dims")?
@@ -223,15 +217,16 @@ impl GpuWorkspace {
             let ptr = cuda.weight_ptr(index)?;
             Ok((index, ptr))
         };
-        let resolve_small = |name: &str, len: usize| -> Result<*mut c_void> {
+        let resolve_small = |name: &str| -> Result<*mut c_void> {
             if !w.small.contains_key(name) {
                 return Err(Error::new(format!("{name} is not a device F32 vector")));
             }
-            Ok(resolve(name, len, 1)?.1)
+            let index = cuda.index_of(w.get(name)?)?;
+            cuda.weight_ptr(index)
         };
 
         let (emb_idx, _) = resolve("token_embd.weight", n_em, vocab)?;
-        let out_norm = resolve_small("output_norm.weight", n_em)?;
+        let out_norm = resolve_small("output_norm.weight")?;
 
         let mut buffers: Vec<*mut c_void> = Vec::new();
         let mut alloc = |floats: usize, name: &str| -> Result<*mut f32> {
@@ -273,8 +268,8 @@ impl GpuWorkspace {
             let norm_name = format!("blk.{il}.attn_norm.weight");
             let post_name = format!("blk.{il}.post_attention_norm.weight");
             let common = CommonIdx {
-                norm: resolve_small(&norm_name, n_em)?,
-                post_norm: resolve_small(&post_name, n_em)?,
+                norm: resolve_small(&norm_name)?,
+                post_norm: resolve_small(&post_name)?,
                 up: resolve(&format!("blk.{il}.ffn_up.weight"), n_em, nf)?.0,
                 gate: resolve(&format!("blk.{il}.ffn_gate.weight"), n_em, nf)?.0,
                 down: resolve(&format!("blk.{il}.ffn_down.weight"), nf, n_em)?.0,
@@ -288,13 +283,10 @@ impl GpuWorkspace {
                     beta: resolve(&format!("blk.{il}.ssm_beta.weight"), n_em, p.ssm_dt_rank)?.0,
                     alpha: resolve(&format!("blk.{il}.ssm_alpha.weight"), n_em, p.ssm_dt_rank)?.0,
                     out: resolve(&format!("blk.{il}.ssm_out.weight"), value_dim, n_em)?.0,
-                    dt_bias: resolve_small(&format!("blk.{il}.ssm_dt.bias"), p.ssm_dt_rank)?,
-                    a: resolve_small(&format!("blk.{il}.ssm_a"), p.ssm_dt_rank)?,
-                    conv: resolve_small(
-                        &conv_name,
-                        checked_mul(p.conv_kernel, channels, "conv kernel")?,
-                    )?,
-                    norm: resolve_small(&format!("blk.{il}.ssm_norm.weight"), p.ssm_state)?,
+                    dt_bias: resolve_small(&format!("blk.{il}.ssm_dt.bias"))?,
+                    a: resolve_small(&format!("blk.{il}.ssm_a"))?,
+                    conv: resolve_small(&conv_name)?,
+                    norm: resolve_small(&format!("blk.{il}.ssm_norm.weight"))?,
                 };
                 let hist = if hist_bytes > 0 {
                     [
@@ -317,8 +309,8 @@ impl GpuWorkspace {
                     k: resolve(&format!("blk.{il}.attn_k.weight"), n_em, kv_dim)?.0,
                     v: resolve(&format!("blk.{il}.attn_v.weight"), n_em, kv_dim)?.0,
                     out: resolve(&format!("blk.{il}.attn_output.weight"), nhd, n_em)?.0,
-                    q_norm: resolve_small(&format!("blk.{il}.attn_q_norm.weight"), p.head_dim)?,
-                    k_norm: resolve_small(&format!("blk.{il}.attn_k_norm.weight"), p.head_dim)?,
+                    q_norm: resolve_small(&format!("blk.{il}.attn_q_norm.weight"))?,
+                    k_norm: resolve_small(&format!("blk.{il}.attn_k_norm.weight"))?,
                 };
                 let kc = alloc(kvc_floats, "k cache")?.cast::<c_void>();
                 let vc = alloc(kvc_floats, "v cache")?.cast::<c_void>();
@@ -478,7 +470,7 @@ impl GpuWorkspace {
                     let head = self.gdn_out.wrapping_add((h * d.ds) as usize);
                     let z_head = self.z.wrapping_add((h * d.ds) as usize);
                     cuda.op_rmsnorm(head, r.norm.cast::<f32>(), head, d.ds, self.eps)?;
-                    cuda.op_silu_mul(head, z_head, head, d.ds)?;
+                    cuda.op_silu_mul(z_head, head, head, d.ds)?;
                 }
                 cuda.matvec_device(r.out, self.gdn_out, self.attn)?;
                 li += 1;
@@ -536,7 +528,7 @@ impl GpuWorkspace {
             )?;
             cuda.matvec_device(layer.common.up, self.norm2, self.up)?;
             cuda.matvec_device(layer.common.gate, self.norm2, self.gate_ffn)?;
-            cuda.op_silu_mul(self.up, self.gate_ffn, self.up, d.n_ff)?;
+            cuda.op_silu_mul(self.gate_ffn, self.up, self.up, d.n_ff)?;
             cuda.matvec_device(layer.common.down, self.up, self.ffn)?;
             cuda.op_add(self.x, self.ffn, d.n_embd)?;
         }
