@@ -214,6 +214,7 @@ __global__ void lcr_row_kernel(const uint8_t *blob, int type, int in, float *out
 struct LcrContext {
     int device;
     char name[256];
+    cudaStream_t stream;
     void *d_blob;
     float *d_x;
     float *d_y;
@@ -278,6 +279,10 @@ int lcr_gpu_init(void **ctx_out, int device) {
     snprintf(c->name, sizeof(c->name), "%s (sm_%d%d, CUDA %d.%d)",
              prop.name, prop.major, prop.minor, CUDART_VERSION / 1000,
              (CUDART_VERSION / 10) % 100);
+    if (cudaStreamCreate(&c->stream) != cudaSuccess) {
+        free(c);
+        return LCR_ERR_CUDA;
+    }
     *ctx_out = c;
     return LCR_OK;
 }
@@ -288,6 +293,8 @@ void lcr_gpu_free(void *ctx) {
     }
     LcrContext *c = (LcrContext *)ctx;
     cudaSetDevice(c->device);
+    cudaStreamSynchronize(c->stream);
+    cudaStreamDestroy(c->stream);
     lcr_release_device(c);
     free(c);
 }
@@ -345,7 +352,7 @@ int lcr_gpu_upload(void *ctx, const void *blob, size_t bytes,
         free(host_metas);
         return LCR_ERR_CUDA;
     }
-    if (cudaMemcpy(d_blob, blob, bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+    if (cudaMemcpyAsync(d_blob, blob, bytes, cudaMemcpyHostToDevice, c->stream) != cudaSuccess) {
         cudaFree(d_blob);
         cudaFree(d_x);
         cudaFree(d_y);
@@ -383,16 +390,21 @@ int lcr_gpu_matvec(void *ctx, int index, const float *x, float *out) {
     size_t nf = (size_t)m->in;
     size_t no = (size_t)m->out;
 
-    if (cudaMemcpy(c->d_x, x, nf * sizeof(float), cudaMemcpyHostToDevice) != cudaSuccess) {
+    if (cudaMemcpyAsync(c->d_x, x, nf * sizeof(float), cudaMemcpyHostToDevice,
+                        c->stream) != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
-    lcr_matvec_kernel<<<(unsigned int)no, LCR_BLOCK_SIZE>>>(
+    lcr_matvec_kernel<<<(unsigned int)no, LCR_BLOCK_SIZE, 0, c->stream>>>(
         (const uint8_t *)c->d_blob, m->type, (int)m->in, c->d_x, c->d_y,
         m->offset, rb);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
-    if (cudaMemcpy(out, c->d_y, no * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+    if (cudaMemcpyAsync(out, c->d_y, no * sizeof(float), cudaMemcpyDeviceToHost,
+                        c->stream) != cudaSuccess) {
+        return LCR_ERR_CUDA;
+    }
+    if (cudaStreamSynchronize(c->stream) != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -421,13 +433,17 @@ int lcr_gpu_row(void *ctx, int index, int row, float *out) {
     }
     size_t nf = (size_t)m->in;
 
-    lcr_row_kernel<<<1, LCR_BLOCK_SIZE>>>(
+    lcr_row_kernel<<<1, LCR_BLOCK_SIZE, 0, c->stream>>>(
         (const uint8_t *)c->d_blob, m->type, (int)m->in, c->d_y,
         m->offset + (int64_t)row * (int64_t)rb, rb);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
-    if (cudaMemcpy(out, c->d_y, nf * sizeof(float), cudaMemcpyDeviceToHost) != cudaSuccess) {
+    if (cudaMemcpyAsync(out, c->d_y, nf * sizeof(float), cudaMemcpyDeviceToHost,
+                        c->stream) != cudaSuccess) {
+        return LCR_ERR_CUDA;
+    }
+    if (cudaStreamSynchronize(c->stream) != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -447,14 +463,26 @@ int lcr_gpu_info(void *ctx, char *buf, int len) {
     return LCR_OK;
 }
 
+int lcr_gpu_sync(void *ctx) {
+    if (!ctx) {
+        return LCR_ERR_ARG;
+    }
+    LcrContext *c = (LcrContext *)ctx;
+    if (cudaSetDevice(c->device) != cudaSuccess) {
+        return LCR_ERR_CUDA;
+    }
+    return cudaStreamSynchronize(c->stream) == cudaSuccess ? LCR_OK : LCR_ERR_CUDA;
+}
+
 // ---------------------------------------------------------------------------
 // Per-token Qwen3.5 graph operations.
 //
 // Every pointer argument of the lcr_op_* entry points below is a DEVICE
 // pointer. This keeps the whole forward graph resident on the GPU. The
 // host-facing lcr_gpu_matvec/lcr_gpu_row above are unchanged.
-// Each entry point sets the context device, launches on the default stream and
-// synchronizes before returning, so ops can be chained one at a time.
+// Each entry point sets the context device, launches on the context stream and
+// returns immediately; the caller issues one lcr_gpu_sync per token. Work on a
+// single stream is ordered, so later ops see earlier results without syncs.
 // ---------------------------------------------------------------------------
 
 // Block reductions over LCR_BLOCK_SIZE threads. tmp has one slot per warp.
@@ -749,6 +777,84 @@ __global__ void lcr_argmax_kernel(const float *x, int n, int *out) {
     }
 }
 
+// --- fused per-head kernels -------------------------------------------------
+
+// qg[h] holds q[head_dim] followed by gate[head_dim].
+__global__ void lcr_split_qg_kernel(const float *qg, float *q, float *g,
+                                    int head_dim) {
+    const int h = blockIdx.x;
+    const size_t base = (size_t)h * 2 * head_dim;
+    for (int i = threadIdx.x; i < head_dim; i += LCR_BLOCK_SIZE) {
+        q[(size_t)h * head_dim + i] = qg[base + i];
+        g[(size_t)h * head_dim + i] = qg[base + head_dim + i];
+    }
+}
+
+// RMSNorm has no eps argument in the ABI; Qwen3.5 uses 1e-6.
+#define LCR_QK_NORM_EPS 1e-6f
+
+__global__ void lcr_qk_norm_rope_kernel(float *x, const float *w, int head_dim,
+                                        int n_rot, float base, int pos) {
+    __shared__ float tmp[LCR_BLOCK_SIZE / 32];
+    const int h = blockIdx.x;
+    const int tid = threadIdx.x;
+    float *xh = x + (size_t)h * head_dim;
+
+    float ss = 0.0f;
+    for (int i = tid; i < head_dim; i += LCR_BLOCK_SIZE) {
+        ss += xh[i] * xh[i];
+    }
+    const float inv = rsqrtf(lcr_block_sum(ss, tmp) / (float)head_dim + LCR_QK_NORM_EPS);
+    for (int i = tid; i < head_dim; i += LCR_BLOCK_SIZE) {
+        xh[i] = xh[i] * w[i] * inv;
+    }
+    __syncthreads();
+
+    const int half = n_rot >> 1;
+    for (int i = tid; i < half; i += LCR_BLOCK_SIZE) {
+        const double ang =
+            (double)pos * pow((double)base, -2.0 * (double)i / (double)n_rot);
+        const float c = cosf((float)ang);
+        const float s = sinf((float)ang);
+        const float a = xh[i];
+        const float b = xh[i + half];
+        xh[i] = a * c - b * s;
+        xh[i + half] = a * s + b * c;
+    }
+}
+
+__global__ void lcr_l2norm_heads_kernel(float *x, int head_dim, float eps) {
+    __shared__ float tmp[LCR_BLOCK_SIZE / 32];
+    const int tid = threadIdx.x;
+    float *xh = x + (size_t)blockIdx.x * head_dim;
+    float ss = 0.0f;
+    for (int i = tid; i < head_dim; i += LCR_BLOCK_SIZE) {
+        ss += xh[i] * xh[i];
+    }
+    const float inv = rsqrtf(lcr_block_sum(ss, tmp) + eps);
+    for (int i = tid; i < head_dim; i += LCR_BLOCK_SIZE) {
+        xh[i] *= inv;
+    }
+}
+
+__global__ void lcr_gdn_post_kernel(const float *gdn, const float *z,
+                                    const float *norm_w, float *y,
+                                    int head_dim, float eps) {
+    __shared__ float tmp[LCR_BLOCK_SIZE / 32];
+    const int tid = threadIdx.x;
+    const size_t base = (size_t)blockIdx.x * head_dim;
+    float ss = 0.0f;
+    for (int i = tid; i < head_dim; i += LCR_BLOCK_SIZE) {
+        ss += gdn[base + i] * gdn[base + i];
+    }
+    const float inv = rsqrtf(lcr_block_sum(ss, tmp) / (float)head_dim + eps);
+    for (int i = tid; i < head_dim; i += LCR_BLOCK_SIZE) {
+        const float v = z[base + i];
+        const float silu = v / (1.0f + expf(-v));
+        y[base + i] = silu * (gdn[base + i] * norm_w[i] * inv);
+    }
+}
+
 // --- device-resident helpers ------------------------------------------------
 
 int lcr_gpu_zero(void *ctx, void *ptr, size_t bytes) {
@@ -759,8 +865,7 @@ int lcr_gpu_zero(void *ctx, void *ptr, size_t bytes) {
     if (cudaSetDevice(c->device) != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
-    if (cudaMemset(ptr, 0, bytes) != cudaSuccess ||
-        cudaDeviceSynchronize() != cudaSuccess) {
+    if (cudaMemsetAsync(ptr, 0, bytes, c->stream) != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -786,10 +891,10 @@ int lcr_gpu_row_device(void *ctx, int index, int row, float *dst) {
     if (rc != LCR_OK) {
         return rc;
     }
-    lcr_row_kernel<<<1, LCR_BLOCK_SIZE>>>(
+    lcr_row_kernel<<<1, LCR_BLOCK_SIZE, 0, c->stream>>>(
         (const uint8_t *)c->d_blob, m->type, (int)m->in, dst,
         m->offset + (int64_t)row * (int64_t)rb, rb);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -813,9 +918,9 @@ int lcr_gpu_matvec_device(void *ctx, int index, const float *x, float *out) {
         return rc;
     }
     size_t no = (size_t)m->out;
-    lcr_matvec_kernel<<<(unsigned int)no, LCR_BLOCK_SIZE>>>(
+    lcr_matvec_kernel<<<(unsigned int)no, LCR_BLOCK_SIZE, 0, c->stream>>>(
         (const uint8_t *)c->d_blob, m->type, (int)m->in, x, out, m->offset, rb);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -829,9 +934,12 @@ int lcr_gpu_read_i32(void *ctx, const void *src, int *dst) {
     if (cudaSetDevice(c->device) != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
-    return cudaMemcpy(dst, src, sizeof(int), cudaMemcpyDeviceToHost) == cudaSuccess
-               ? LCR_OK
-               : LCR_ERR_CUDA;
+    if (cudaMemcpyAsync(dst, src, sizeof(int), cudaMemcpyDeviceToHost,
+                        c->stream) != cudaSuccess ||
+        cudaStreamSynchronize(c->stream) != cudaSuccess) {
+        return LCR_ERR_CUDA;
+    }
+    return LCR_OK;
 }
 
 int lcr_gpu_buf(void *ctx, size_t bytes, void **out) {
@@ -879,8 +987,8 @@ int lcr_op_rmsnorm(void *ctx, const float *x, const float *w, float *y,
     if (cudaSetDevice(c->device) != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
-    lcr_rmsnorm_kernel<<<1, LCR_BLOCK_SIZE>>>(x, w, y, n, eps);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    lcr_rmsnorm_kernel<<<1, LCR_BLOCK_SIZE, 0, c->stream>>>(x, w, y, n, eps);
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -894,8 +1002,8 @@ int lcr_op_l2norm(void *ctx, float *x, int n, float eps) {
     if (cudaSetDevice(c->device) != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
-    lcr_l2norm_kernel<<<1, LCR_BLOCK_SIZE>>>(x, n, eps);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    lcr_l2norm_kernel<<<1, LCR_BLOCK_SIZE, 0, c->stream>>>(x, n, eps);
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -912,8 +1020,8 @@ int lcr_op_rope(void *ctx, float *x, int n, int n_rot, float base, int pos) {
     }
     const int pairs = n_rot >> 1;
     const int blocks = (pairs + LCR_BLOCK_SIZE - 1) / LCR_BLOCK_SIZE;
-    lcr_rope_kernel<<<blocks, LCR_BLOCK_SIZE>>>(x, n_rot, base, pos);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    lcr_rope_kernel<<<blocks, LCR_BLOCK_SIZE, 0, c->stream>>>(x, n_rot, base, pos);
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -928,8 +1036,8 @@ int lcr_op_add(void *ctx, float *dst, const float *src, int n) {
         return LCR_ERR_CUDA;
     }
     const int blocks = (n + LCR_BLOCK_SIZE - 1) / LCR_BLOCK_SIZE;
-    lcr_add_kernel<<<blocks, LCR_BLOCK_SIZE>>>(dst, src, n);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    lcr_add_kernel<<<blocks, LCR_BLOCK_SIZE, 0, c->stream>>>(dst, src, n);
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -944,8 +1052,8 @@ int lcr_op_mul(void *ctx, float *dst, const float *src, int n) {
         return LCR_ERR_CUDA;
     }
     const int blocks = (n + LCR_BLOCK_SIZE - 1) / LCR_BLOCK_SIZE;
-    lcr_mul_kernel<<<blocks, LCR_BLOCK_SIZE>>>(dst, src, n);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    lcr_mul_kernel<<<blocks, LCR_BLOCK_SIZE, 0, c->stream>>>(dst, src, n);
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -960,8 +1068,8 @@ int lcr_op_scale(void *ctx, float *x, int n, float scale) {
         return LCR_ERR_CUDA;
     }
     const int blocks = (n + LCR_BLOCK_SIZE - 1) / LCR_BLOCK_SIZE;
-    lcr_scale_kernel<<<blocks, LCR_BLOCK_SIZE>>>(x, n, scale);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    lcr_scale_kernel<<<blocks, LCR_BLOCK_SIZE, 0, c->stream>>>(x, n, scale);
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -976,8 +1084,8 @@ int lcr_op_sigmoid(void *ctx, const float *x, float *y, int n) {
         return LCR_ERR_CUDA;
     }
     const int blocks = (n + LCR_BLOCK_SIZE - 1) / LCR_BLOCK_SIZE;
-    lcr_sigmoid_kernel<<<blocks, LCR_BLOCK_SIZE>>>(x, y, n);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    lcr_sigmoid_kernel<<<blocks, LCR_BLOCK_SIZE, 0, c->stream>>>(x, y, n);
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -993,8 +1101,8 @@ int lcr_op_gate(void *ctx, const float *alpha, const float *bias, const float *a
         return LCR_ERR_CUDA;
     }
     const int blocks = (n + LCR_BLOCK_SIZE - 1) / LCR_BLOCK_SIZE;
-    lcr_gate_kernel<<<blocks, LCR_BLOCK_SIZE>>>(alpha, bias, a, gate, n);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    lcr_gate_kernel<<<blocks, LCR_BLOCK_SIZE, 0, c->stream>>>(alpha, bias, a, gate, n);
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -1009,8 +1117,8 @@ int lcr_op_silu_mul(void *ctx, const float *a, const float *b, float *y, int n) 
         return LCR_ERR_CUDA;
     }
     const int blocks = (n + LCR_BLOCK_SIZE - 1) / LCR_BLOCK_SIZE;
-    lcr_silu_mul_kernel<<<blocks, LCR_BLOCK_SIZE>>>(a, b, y, n);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    lcr_silu_mul_kernel<<<blocks, LCR_BLOCK_SIZE, 0, c->stream>>>(a, b, y, n);
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -1032,9 +1140,9 @@ int lcr_op_conv_silu(void *ctx, const float *w, const float *hist, const float *
     const int pitch = stride >= channels ? stride : channels;
     const int blocks = (channels + LCR_BLOCK_SIZE - 1) / LCR_BLOCK_SIZE;
     // hist is const in the public ABI but the op updates it in place.
-    lcr_conv_silu_kernel<<<blocks, LCR_BLOCK_SIZE>>>(
+    lcr_conv_silu_kernel<<<blocks, LCR_BLOCK_SIZE, 0, c->stream>>>(
         w, (float *)hist, qkv, out, channels, k, pitch);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -1052,9 +1160,9 @@ int lcr_op_gdn(void *ctx, const float *q, const float *k, const float *v,
         return LCR_ERR_CUDA;
     }
     const size_t smem_bytes = (size_t)(2 * d + 2) * sizeof(float);
-    lcr_gdn_kernel<<<n_v, LCR_BLOCK_SIZE, smem_bytes>>>(
+    lcr_gdn_kernel<<<n_v, LCR_BLOCK_SIZE, smem_bytes, c->stream>>>(
         q, k, v, gate, beta, state, out, n_k, d);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -1073,12 +1181,12 @@ int lcr_op_attn(void *ctx, const float *q, const float *k, const float *v,
     if (cudaSetDevice(c->device) != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
-    lcr_attn_store_kernel<<<n_kv, LCR_BLOCK_SIZE>>>(
+    lcr_attn_store_kernel<<<n_kv, LCR_BLOCK_SIZE, 0, c->stream>>>(
         k, v, kc, vc, n_kv, seq_cap, seq_pos, d);
     // Same stream: the cache write completes before any query head reads it.
-    lcr_attn_kernel<<<n_heads, LCR_BLOCK_SIZE, (size_t)d * sizeof(float)>>>(
+    lcr_attn_kernel<<<n_heads, LCR_BLOCK_SIZE, (size_t)d * sizeof(float), c->stream>>>(
         q, g, kc, vc, out, n_heads, n_kv, d, seq_pos, seq_cap, scale);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
@@ -1092,9 +1200,66 @@ int lcr_op_argmax(void *ctx, const float *x, int n, int *out) {
     if (cudaSetDevice(c->device) != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
-    lcr_argmax_kernel<<<1, LCR_BLOCK_SIZE>>>(x, n, out);
-    if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+    lcr_argmax_kernel<<<1, LCR_BLOCK_SIZE, 0, c->stream>>>(x, n, out);
+    if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
     return LCR_OK;
+}
+
+int lcr_op_split_qg(void *ctx, const float *qg, float *q, float *g,
+                    int n_heads, int head_dim) {
+    if (!ctx || !qg || !q || !g || n_heads <= 0 || head_dim <= 0) {
+        return LCR_ERR_ARG;
+    }
+    LcrContext *c = (LcrContext *)ctx;
+    if (cudaSetDevice(c->device) != cudaSuccess) {
+        return LCR_ERR_CUDA;
+    }
+    lcr_split_qg_kernel<<<n_heads, LCR_BLOCK_SIZE, 0, c->stream>>>(
+        qg, q, g, head_dim);
+    return cudaGetLastError() == cudaSuccess ? LCR_OK : LCR_ERR_CUDA;
+}
+
+int lcr_op_qk_norm_rope(void *ctx, float *x, const float *w,
+                        int n_heads, int head_dim, int n_rot, float base, int pos) {
+    if (!ctx || !x || !w || n_heads <= 0 || head_dim <= 0 ||
+        n_rot <= 0 || n_rot > head_dim || (n_rot & 1) || !(base > 0.0f) || pos < 0) {
+        return LCR_ERR_ARG;
+    }
+    LcrContext *c = (LcrContext *)ctx;
+    if (cudaSetDevice(c->device) != cudaSuccess) {
+        return LCR_ERR_CUDA;
+    }
+    lcr_qk_norm_rope_kernel<<<n_heads, LCR_BLOCK_SIZE, 0, c->stream>>>(
+        x, w, head_dim, n_rot, base, pos);
+    return cudaGetLastError() == cudaSuccess ? LCR_OK : LCR_ERR_CUDA;
+}
+
+int lcr_op_l2norm_heads(void *ctx, float *x, int n_heads, int head_dim, float eps) {
+    if (!ctx || !x || n_heads <= 0 || head_dim <= 0 || eps < 0.0f) {
+        return LCR_ERR_ARG;
+    }
+    LcrContext *c = (LcrContext *)ctx;
+    if (cudaSetDevice(c->device) != cudaSuccess) {
+        return LCR_ERR_CUDA;
+    }
+    lcr_l2norm_heads_kernel<<<n_heads, LCR_BLOCK_SIZE, 0, c->stream>>>(
+        x, head_dim, eps);
+    return cudaGetLastError() == cudaSuccess ? LCR_OK : LCR_ERR_CUDA;
+}
+
+int lcr_op_gdn_post(void *ctx, const float *gdn, const float *z, const float *norm_w,
+                    float *y, int n_heads, int head_dim, float eps) {
+    if (!ctx || !gdn || !z || !norm_w || !y || n_heads <= 0 || head_dim <= 0 ||
+        eps < 0.0f) {
+        return LCR_ERR_ARG;
+    }
+    LcrContext *c = (LcrContext *)ctx;
+    if (cudaSetDevice(c->device) != cudaSuccess) {
+        return LCR_ERR_CUDA;
+    }
+    lcr_gdn_post_kernel<<<n_heads, LCR_BLOCK_SIZE, 0, c->stream>>>(
+        gdn, z, norm_w, y, head_dim, eps);
+    return cudaGetLastError() == cudaSuccess ? LCR_OK : LCR_ERR_CUDA;
 }
