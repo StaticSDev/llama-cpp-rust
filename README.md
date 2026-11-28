@@ -15,7 +15,7 @@ It is kept in `reference/llama.cpp` and is not committed.
 - Qwen3.5 dense and hybrid layers: gated delta net, full attention, RoPE, FFN.
 - GGUF loading for Q4_K, Q5_K, Q6_K, Q8_0, F32, F16 and BF16 tensors.
 - Greedy and temperature + top-p sampling.
-- CPU matvec across 12 threads; CUDA matvec with weights resident in VRAM.
+- CPU matvec across 12 threads; full Qwen3.5 graph resident in VRAM on CUDA.
 - A std-only HTTP server with newline-delimited streaming and live telemetry.
 
 ## Quick start
@@ -40,6 +40,12 @@ target/release/llama-rs \
 
 `build.rs` compiles `cuda/lcr_kernels.cu` with `nvcc -arch=sm_75`.
 Without `--features cuda`, the `--gpu` flag returns a clear error.
+
+In GPU mode the whole per-token graph runs on the device: embeddings, RMS/L2
+norms, RoPE, causal conv, gated delta net, attention with a KV cache, SwiGLU,
+the tied LM head and argmax. Greedy sampling is supported; temperature and
+top-p sampling are still CPU-only, so use `--temp 0` with `--gpu`. The GPU KV
+cache is capped at 4096 tokens to fit a 6 GB card.
 
 ## Web chat
 
@@ -75,17 +81,18 @@ threads, 15 GiB RAM. **Model:** Qwen3.5-4B-Q4_K_M.gguf.
 | --- | ---: | ---: | ---: |
 | Cold prefill, 203 / 202 tokens | 154.98 tok/s | 6.51 tok/s | 0.04× |
 | Generation, 6 tokens | 46.14 tok/s | 6.53 tok/s | 0.14× |
-| Generation, 200 tokens, 3 runs | 54.57 tok/s | 6.34 tok/s | 0.12× |
+| Generation, 200 tokens, partial CUDA | 54.57 tok/s | 6.34 tok/s | 0.12× |
+| Generation, 32 tokens, full GPU graph | — | 8.88 tok/s | — |
 
 Upstream flags: `-ngl 99 -c 32768 -t 6 -tb 12 -b 2048 -ub 512 -np 1 -fa on
 -ctk q4_0 -ctv q4_0 --context-shift --jinja`. Prompt cache reuse was disabled
 for the cold-prefill number.
 
 The short six-token run is noisy; the 200-token run is the stable reference.
-The Rust port is roughly 8× slower than upstream. The GPU kernels dequantize
-scalars per element, launch once per matrix, synchronize after each launch, and
-run attention and recurrent state on the CPU. Upstream reaches the memory
-bandwidth limit of this card; this port does not.
+The port is still roughly 6× slower than upstream. The full graph is on the
+GPU, but every operation launches its own kernel and synchronizes before the
+next one; there is no fusion, CUDA graphs or vectorized dequant. Upstream
+reaches the memory bandwidth limit of this card; this port does not.
 
 Reproduce:
 
