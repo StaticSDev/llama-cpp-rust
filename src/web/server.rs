@@ -103,8 +103,124 @@ fn handle(
         }
         ("POST", "/api/chat") => chat(stream, weights, &body, false),
         ("POST", "/api/chat/stream") => chat(stream, weights, &body, true),
+        ("GET", "/v1/models") => models(stream, model_path),
+        ("POST", "/v1/chat/completions") => openai_chat(stream, weights, &body, model_path),
         _ => respond(stream, "404 Not Found", "text/plain; charset=utf-8", b"Not Found\n"),
     }
+}
+
+fn models(stream: &TcpStream, model_path: &str) -> io::Result<()> {
+    let json = Json::object_from(vec![
+        Item::new("object", "list"),
+        Item::new(
+            "data",
+            Json::array_from(vec![Json::object_from(vec![
+                Item::new("id", model_path),
+                Item::new("object", "model"),
+                Item::new("owned_by", "local"),
+            ])]),
+        ),
+    ]);
+    respond_json(stream, "200 OK", &json)
+}
+
+fn openai_chat(
+    stream: &TcpStream,
+    weights: &Weights,
+    body: &[u8],
+    model_path: &str,
+) -> io::Result<()> {
+    let text = String::from_utf8_lossy(body);
+    let json = match Json::parse(&text) {
+        Ok(json) => json,
+        Err(err) => return json_error(stream, "400 Bad Request", &err.to_string()),
+    };
+    if !json.is_object() {
+        return json_error(stream, "400 Bad Request", "body must be a JSON object");
+    }
+
+    // Only the last user turn becomes the prompt; other roles are ignored.
+    let messages = match json.value("messages", Vec::<Json>::new()) {
+        Ok(messages) => messages,
+        Err(err) => return json_error(stream, "400 Bad Request", &err.to_string()),
+    };
+    let mut prompt: Option<String> = None;
+    for message in &messages {
+        if message.value_str("role", "").unwrap_or_default() != "user" {
+            continue;
+        }
+        match message.value_str("content", "") {
+            Ok(content) => prompt = Some(content),
+            Err(err) => return json_error(stream, "400 Bad Request", &err.to_string()),
+        }
+    }
+    let prompt = match prompt {
+        Some(prompt) if !prompt.is_empty() => prompt,
+        _ => return json_error(stream, "400 Bad Request", "missing or empty 'messages' user content"),
+    };
+
+    let n = match json.value("max_tokens", 64i64) {
+        Ok(n) => n.clamp(0, MAX_TOKENS as i64) as usize,
+        Err(err) => return json_error(stream, "400 Bad Request", &err.to_string()),
+    };
+    let temp = match json.value("temperature", 0.0f32) {
+        Ok(temp) => temp,
+        Err(err) => return json_error(stream, "400 Bad Request", &err.to_string()),
+    };
+    // Accepted for wire compatibility; the runtime seeds its RNG from time.
+    if let Err(err) = json.value("seed", 0i64) {
+        return json_error(stream, "400 Bad Request", &err.to_string());
+    }
+    if !temp.is_finite() {
+        return json_error(stream, "400 Bad Request", "temperature must be finite");
+    }
+
+    // In GPU mode generate_stream rejects temp > 0 (greedy-only sampler),
+    // the same way /api/chat does.
+    let (text, stats) = match generate_stream(weights, &prompt, n, temp, 0.9, |_| {}) {
+        Ok(result) => result,
+        Err(err) => return json_error(stream, "500 Internal Server Error", &err.to_string()),
+    };
+
+    let json = Json::object_from(vec![
+        Item::new("id", "lcr-1"),
+        Item::new("object", "chat.completion"),
+        Item::new("model", model_path),
+        Item::new(
+            "choices",
+            Json::array_from(vec![Json::object_from(vec![
+                Item::new("index", 0i64),
+                Item::new(
+                    "message",
+                    Json::object_from(vec![
+                        Item::new("role", "assistant"),
+                        Item::new("content", text),
+                    ]),
+                ),
+                Item::new("finish_reason", "stop"),
+            ])]),
+        ),
+        Item::new(
+            "usage",
+            Json::object_from(vec![
+                Item::new("prompt_tokens", stats.prompt_tokens),
+                Item::new("completion_tokens", stats.tokens),
+                Item::new("total_tokens", stats.prompt_tokens + stats.tokens),
+            ]),
+        ),
+        Item::new(
+            "timings",
+            Json::object_from(vec![
+                Item::new("prompt_n", stats.prompt_tokens),
+                Item::new("prompt_per_second", stats.prompt_tokens_per_sec()),
+                Item::new("predicted_n", stats.tokens),
+                Item::new("predicted_per_second", stats.tokens_per_sec()),
+                Item::new("prompt_ms", stats.prompt_ms as u64),
+                Item::new("predicted_ms", stats.gen_ms as u64),
+            ]),
+        ),
+    ]);
+    respond_json(stream, "200 OK", &json)
 }
 
 fn chat(stream: &TcpStream, weights: &Weights, body: &[u8], streaming: bool) -> io::Result<()> {
