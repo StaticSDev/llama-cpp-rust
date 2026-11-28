@@ -10,7 +10,7 @@ use std::ffi::c_void;
 use std::ptr;
 use std::sync::Arc;
 
-const PREFILL_CHUNK: usize = 8;
+const PREFILL_CHUNK: usize = 16;
 
 fn checked_mul(a: usize, b: usize, what: &str) -> Result<usize> {
     a.checked_mul(b)
@@ -130,6 +130,10 @@ pub struct GpuWorkspace {
     batch_norm2: *mut f32,
     batch_qkv: *mut f32,
     batch_z: *mut f32,
+    batch_gate: *mut f32,
+    batch_beta: *mut f32,
+    batch_q: *mut f32,
+    batch_g: *mut f32,
     batch_gdn: *mut f32,
     batch_attn: *mut f32,
     batch_attn_out: *mut f32,
@@ -291,8 +295,19 @@ impl GpuWorkspace {
             "batch qkv",
         )?;
         let batch_z = alloc(checked_mul(PREFILL_CHUNK, value_dim, "batch z")?, "batch z")?;
+        // Recurrent gate/beta are per token; GDN reads/writes whole conv rows.
+        let batch_gate = alloc(
+            checked_mul(PREFILL_CHUNK, p.ssm_dt_rank, "batch gate")?,
+            "batch gate",
+        )?;
+        let batch_beta = alloc(
+            checked_mul(PREFILL_CHUNK, p.ssm_dt_rank, "batch beta")?,
+            "batch beta",
+        )?;
+        let batch_q = alloc(checked_mul(PREFILL_CHUNK, nhd, "batch q")?, "batch q")?;
+        let batch_g = alloc(checked_mul(PREFILL_CHUNK, nhd, "batch g")?, "batch g")?;
         let batch_gdn = alloc(
-            checked_mul(PREFILL_CHUNK, value_dim, "batch gdn")?,
+            checked_mul(PREFILL_CHUNK, qkv_floats, "batch gdn")?,
             "batch gdn",
         )?;
         let batch_attn = alloc(
@@ -419,6 +434,10 @@ impl GpuWorkspace {
             batch_norm2,
             batch_qkv,
             batch_z,
+            batch_gate,
+            batch_beta,
+            batch_q,
+            batch_g,
             batch_gdn,
             batch_attn,
             batch_attn_out,
@@ -642,14 +661,16 @@ impl GpuWorkspace {
         let nhd = (d.n_head * d.hd) as usize;
         let kv_dim = (d.n_kv * d.hd) as usize;
         let value_dim = (d.nv * d.ds) as usize;
-        let qkv_stride = d.channels.max(2 * d.n_head * d.hd) as usize;
         let value_stride = d.nv * d.ds;
         let kv_stride = d.n_kv * d.hd;
         let qkv_out_stride = d.channels.max(2 * d.n_head * d.hd);
+        let gate_stride = d.nv;
+        let mut chunk_pos = start_pos;
 
         for chunk in tokens.chunks(PREFILL_CHUNK) {
             let nt = chunk.len();
             let nt_i32 = to_i32(nt, "prefill chunk")?;
+            let chunk_pos_i32 = to_i32(chunk_pos, "prefill position")?;
 
             for (t, &tok) in chunk.iter().enumerate() {
                 if tok < 0 || tok as usize >= d.vocab as usize {
@@ -724,74 +745,75 @@ impl GpuWorkspace {
                     )?;
                 }
 
-                // Conv history, GDN state and KV cache depend on the previous
-                // token, so these fused ops keep the per-token order.
-                for t in 0..nt {
-                    let pos = to_i32(start_pos + t, "prefill position")?;
-                    let norm_i = self.batch_norm.wrapping_add(t * e);
-                    if self.p.is_recurrent(il) {
-                        let r = layer
-                            .rec
-                            .as_ref()
-                            .ok_or_else(|| Error::new("missing recurrent GPU layer"))?;
-                        let state = &mut self.rec_states[li];
-                        cuda.matvec_device(r.beta, norm_i, self.beta_raw)?;
-                        cuda.matvec_device(r.alpha, norm_i, self.alpha_raw)?;
+                // Conv history, GDN state and KV cache are sequential over t.
+                // The batched kernels below keep that order within one launch.
+                if self.p.is_recurrent(il) {
+                    let r = layer
+                        .rec
+                        .as_ref()
+                        .ok_or_else(|| Error::new("missing recurrent GPU layer"))?;
+                    let state = &mut self.rec_states[li];
+
+                    for t in 0..nt {
+                        let norm_i = self.batch_norm.wrapping_add(t * e);
+                        let gate_i = self.batch_gate.wrapping_add(t * gate_stride as usize);
+                        let beta_i = self.batch_beta.wrapping_add(t * gate_stride as usize);
+                        cuda.matvec_device(r.alpha, norm_i, gate_i)?;
+                        cuda.matvec_device(r.beta, norm_i, beta_i)?;
                         cuda.op_gate(
-                            self.alpha_raw,
+                            gate_i,
                             r.dt_bias.cast::<f32>(),
                             r.a.cast::<f32>(),
-                            self.gate,
+                            gate_i,
                             d.nv,
                         )?;
-                        cuda.op_sigmoid(self.beta_raw, self.beta, d.nv)?;
+                        cuda.op_sigmoid(beta_i, beta_i, d.nv)?;
+                    }
 
-                        let qkv_i = self.batch_qkv.wrapping_add(t * qkv_stride);
-                        let gdn_i = self.batch_gdn.wrapping_add(t * value_dim);
-                        let hist_cur = state.hist[state.cur].cast::<f32>();
-                        cuda.op_conv_silu(
-                            r.conv.cast::<f32>(),
-                            hist_cur,
-                            qkv_i,
-                            self.conv_out,
-                            d.channels,
-                            d.ksize,
-                            d.channels,
-                        )?;
+                    // Each channel is read before it is written, so the conv
+                    // output can reuse the source qkv row.
+                    cuda.batch_conv_silu(
+                        r.conv.cast::<f32>(),
+                        state.hist[state.cur].cast::<f32>(),
+                        self.batch_qkv,
+                        self.batch_qkv,
+                        nt_i32,
+                        qkv_out_stride,
+                        qkv_out_stride,
+                        d.channels,
+                        d.ksize,
+                        d.channels,
+                    )?;
 
-                        if d.hist_bytes > 0 {
-                            let next = 1 - state.cur;
-                            let dst = state.hist[next].cast::<f32>();
-                            cuda.zero(state.hist[next], d.hist_bytes)?;
-                            if d.ksize > 2 {
-                                for j in 0..(d.ksize - 2) {
-                                    let old = hist_cur
-                                        .wrapping_add((j + 1) as usize * d.channels as usize);
-                                    cuda.op_add(
-                                        dst.wrapping_add(j as usize * d.channels as usize),
-                                        old,
-                                        d.channels,
-                                    )?;
-                                }
-                            }
-                            let last = (d.ksize - 2) as usize * d.channels as usize;
-                            cuda.op_add(dst.wrapping_add(last), qkv_i, d.channels)?;
-                            state.cur = next;
-                        }
-
-                        cuda.op_l2norm_heads(self.conv_out, 2 * d.nk, d.ds, self.eps)?;
-                        cuda.op_gdn(
-                            self.conv_out,
-                            self.conv_out.wrapping_add(d.key_dim as usize),
-                            self.conv_out.wrapping_add((2 * d.key_dim) as usize),
-                            self.gate,
-                            self.beta,
-                            state.state.cast::<f32>(),
-                            gdn_i,
-                            d.nv,
-                            d.nk,
+                    for t in 0..nt {
+                        cuda.op_l2norm_heads(
+                            self.batch_qkv.wrapping_add(t * qkv_out_stride as usize),
+                            2 * d.nk,
                             d.ds,
+                            self.eps,
                         )?;
+                    }
+
+                    cuda.batch_gdn(
+                        self.batch_qkv,
+                        self.batch_qkv.wrapping_add(d.key_dim as usize),
+                        self.batch_qkv.wrapping_add((2 * d.key_dim) as usize),
+                        self.batch_gate,
+                        self.batch_beta,
+                        state.state.cast::<f32>(),
+                        self.batch_gdn,
+                        nt_i32,
+                        qkv_out_stride,
+                        qkv_out_stride,
+                        qkv_out_stride,
+                        gate_stride,
+                        d.nv,
+                        d.nk,
+                        d.ds,
+                    )?;
+
+                    for t in 0..nt {
+                        let gdn_i = self.batch_gdn.wrapping_add(t * qkv_out_stride as usize);
                         cuda.op_gdn_post(
                             gdn_i,
                             self.batch_z.wrapping_add(t * value_dim),
@@ -801,23 +823,21 @@ impl GpuWorkspace {
                             d.ds,
                             self.eps,
                         )?;
-                    } else {
-                        let f = layer
-                            .full
-                            .as_ref()
-                            .ok_or_else(|| Error::new("missing full-attention GPU layer"))?;
-                        let state = &self.full_states[fi];
-                        cuda.zero(self.heads.cast::<c_void>(), d.head_bytes)?;
-                        cuda.zero(self.gates.cast::<c_void>(), d.head_bytes)?;
-                        cuda.op_split_qg(
-                            self.batch_qkv.wrapping_add(t * qkv_stride),
-                            self.heads,
-                            self.gates,
-                            d.n_head,
-                            d.hd,
-                        )?;
+                    }
+                } else {
+                    let f = layer
+                        .full
+                        .as_ref()
+                        .ok_or_else(|| Error::new("missing full-attention GPU layer"))?;
+                    let state = &self.full_states[fi];
+                    for t in 0..nt {
+                        let pos = to_i32(chunk_pos + t, "prefill position")?;
+                        let qkv_i = self.batch_qkv.wrapping_add(t * qkv_out_stride as usize);
+                        let q_i = self.batch_q.wrapping_add(t * nhd);
+                        let g_i = self.batch_g.wrapping_add(t * nhd);
+                        cuda.op_split_qg(qkv_i, q_i, g_i, d.n_head, d.hd)?;
                         cuda.op_qk_norm_rope(
-                            self.heads,
+                            q_i,
                             f.q_norm.cast::<f32>(),
                             d.n_head,
                             d.hd,
@@ -834,22 +854,26 @@ impl GpuWorkspace {
                             self.rope_base,
                             pos,
                         )?;
-                        cuda.op_attn(
-                            self.heads,
-                            self.batch_head_k.wrapping_add(t * kv_dim),
-                            self.batch_head_v.wrapping_add(t * kv_dim),
-                            self.gates,
-                            state.kc.cast::<f32>(),
-                            state.vc.cast::<f32>(),
-                            self.batch_attn_out.wrapping_add(t * nhd),
-                            d.n_head,
-                            d.n_kv,
-                            d.hd,
-                            pos,
-                            d.seq_cap,
-                            self.scale,
-                        )?;
                     }
+                    cuda.batch_attn(
+                        self.batch_q,
+                        self.batch_head_k,
+                        self.batch_head_v,
+                        self.batch_g,
+                        state.kc.cast::<f32>(),
+                        state.vc.cast::<f32>(),
+                        self.batch_attn_out,
+                        nt_i32,
+                        d.n_head * d.hd,
+                        kv_stride,
+                        d.n_head * d.hd,
+                        d.n_head,
+                        d.n_kv,
+                        d.hd,
+                        chunk_pos_i32,
+                        d.seq_cap,
+                        self.scale,
+                    )?;
                 }
                 if self.p.is_recurrent(il) {
                     li += 1;
@@ -867,7 +891,7 @@ impl GpuWorkspace {
                         self.batch_gdn,
                         self.batch_attn,
                         nt_i32,
-                        value_stride,
+                        qkv_out_stride,
                         d.n_embd,
                     )?;
                 } else {
@@ -943,6 +967,7 @@ impl GpuWorkspace {
                 self.eps,
             )?;
             cuda.batch_matmul(self.emb_idx, self.h, self.logits, 1, d.n_embd, d.vocab)?;
+            chunk_pos += nt;
         }
 
         cuda.op_argmax(self.logits, d.vocab, self.argmax.cast::<i32>())?;

@@ -259,3 +259,221 @@ int lcr_batch_matmul(void *ctx, int index, const float *x, float *out,
         m->offset, rb, x_stride, out_stride);
     return cudaGetLastError() == cudaSuccess ? BATCH_OK : BATCH_ERR_CUDA;
 }
+
+// Block reduction over BATCH_BLOCK_SIZE threads; tmp has one slot per warp.
+// Mirrors lcr_block_sum in lcr_kernels.cu (separate translation unit).
+__device__ __forceinline__ float batch_block_sum(float v, float *tmp) {
+    for (int s = 16; s > 0; s >>= 1) {
+        v += __shfl_down_sync(0xFFFFFFFFu, v, s);
+    }
+    const int lane = threadIdx.x & 31;
+    const int wid = threadIdx.x >> 5;
+    if (lane == 0) {
+        tmp[wid] = v;
+    }
+    __syncthreads();
+    float r = threadIdx.x < (BATCH_BLOCK_SIZE / 32) ? tmp[threadIdx.x] : 0.0f;
+    if (threadIdx.x < 32) {
+        for (int s = (BATCH_BLOCK_SIZE / 32) / 2; s > 0; s >>= 1) {
+            r += __shfl_down_sync(0xFFFFFFFFu, r, s);
+        }
+        if (threadIdx.x == 0) {
+            tmp[0] = r;
+        }
+    }
+    __syncthreads();
+    return tmp[0];
+}
+
+// One thread owns one channel across all tokens, so the in-place history
+// shift needs no cross-thread synchronization.
+__global__ void lcr_batch_conv_silu_kernel(const float *w, float *hist,
+                                           const float *qkv, float *out,
+                                           int n_tokens, int qkv_stride,
+                                           int out_stride, int channels, int k,
+                                           int pitch) {
+    for (int c = blockIdx.x * blockDim.x + threadIdx.x; c < channels;
+         c += blockDim.x * gridDim.x) {
+        for (int t = 0; t < n_tokens; ++t) {
+            const float q = qkv[(size_t)t * qkv_stride + c];
+            float sum = 0.0f;
+            for (int j = 0; j < k - 1; ++j) {
+                sum += w[(size_t)c * k + j] * hist[(size_t)j * pitch + c];
+            }
+            sum += w[(size_t)c * k + (k - 1)] * q;
+            out[(size_t)t * out_stride + c] = sum / (1.0f + expf(-sum));
+            for (int j = 0; j < k - 2; ++j) {
+                hist[(size_t)j * pitch + c] = hist[(size_t)(j + 1) * pitch + c];
+            }
+            if (k >= 2) {
+                hist[(size_t)(k - 2) * pitch + c] = q;
+            }
+        }
+    }
+}
+
+int lcr_batch_conv_silu(void *ctx, const float *w, float *hist, const float *qkv,
+                        float *out, int n_tokens, int qkv_stride, int out_stride,
+                        int channels, int k, int stride) {
+    if (!ctx || !w || !qkv || !out || n_tokens <= 0 || channels <= 0 || k < 1 ||
+        qkv_stride < channels || out_stride < channels || stride < 0 ||
+        (k > 1 && !hist)) {
+        return BATCH_ERR_ARG;
+    }
+    BatchContext *c = (BatchContext *)ctx;
+    if (cudaSetDevice(c->device) != cudaSuccess) {
+        return BATCH_ERR_CUDA;
+    }
+    // Same padded-row convention as lcr_op_conv_silu.
+    const int pitch = stride >= channels ? stride : channels;
+    const int blocks = (channels + BATCH_BLOCK_SIZE - 1) / BATCH_BLOCK_SIZE;
+    lcr_batch_conv_silu_kernel<<<blocks, BATCH_BLOCK_SIZE, 0, c->stream>>>(
+        w, hist, qkv, out, n_tokens, qkv_stride, out_stride, channels, k, pitch);
+    return cudaGetLastError() == cudaSuccess ? BATCH_OK : BATCH_ERR_CUDA;
+}
+
+// One block per value head. Each thread owns whole state rows j, so the
+// recurrence needs no cross-thread state synchronization.
+__global__ void lcr_batch_gdn_kernel(const float *q, const float *k,
+                                     const float *v, const float *gate,
+                                     const float *beta, float *state, float *out,
+                                     int n_tokens, int q_stride, int kv_stride,
+                                     int v_stride, int g_stride, int n_k,
+                                     int d) {
+    extern __shared__ float smem[];
+    const int h = blockIdx.x;
+    const int kh = h % n_k;
+    const int tid = threadIdx.x;
+    float *sk = smem;
+    float *sq = smem + d;
+    const float inv = rsqrtf((float)d);
+    for (int t = 0; t < n_tokens; ++t) {
+        for (int i = tid; i < d; i += blockDim.x) {
+            sk[i] = k[(size_t)t * kv_stride + (size_t)kh * d + i];
+            sq[i] = q[(size_t)t * q_stride + (size_t)kh * d + i];
+        }
+        if (tid == 0) {
+            smem[2 * d] = expf(gate[(size_t)t * g_stride + h]);
+            smem[2 * d + 1] = beta[(size_t)t * g_stride + h];
+        }
+        __syncthreads();
+        const float decay = smem[2 * d];
+        const float b = smem[2 * d + 1];
+        for (int j = tid; j < d; j += blockDim.x) {
+            float *row = state + (size_t)h * d * d + (size_t)j * d;
+            float kdot = 0.0f;
+            for (int i = 0; i < d; ++i) {
+                row[i] *= decay;
+                kdot += row[i] * sk[i];
+            }
+            const float delta = (v[(size_t)t * v_stride + (size_t)h * d + j] - kdot) * b;
+            float acc = 0.0f;
+            for (int i = 0; i < d; ++i) {
+                row[i] += delta * sk[i];
+                acc += row[i] * sq[i];
+            }
+            out[(size_t)t * v_stride + (size_t)h * d + j] = acc * inv;
+        }
+        __syncthreads();
+    }
+}
+
+int lcr_batch_gdn(void *ctx, const float *q, const float *k, const float *v,
+                  const float *gate, const float *beta, float *state, float *out,
+                  int n_tokens, int q_stride, int kv_stride, int v_stride,
+                  int g_stride, int n_v, int n_k, int d) {
+    if (!ctx || !q || !k || !v || !gate || !beta || !state || !out ||
+        n_tokens <= 0 || n_v <= 0 || n_k <= 0 || d <= 0 || n_v % n_k != 0 ||
+        q_stride < n_k * d || kv_stride < n_k * d || v_stride < n_v * d ||
+        g_stride < n_v) {
+        return BATCH_ERR_ARG;
+    }
+    BatchContext *c = (BatchContext *)ctx;
+    if (cudaSetDevice(c->device) != cudaSuccess) {
+        return BATCH_ERR_CUDA;
+    }
+    const size_t smem_bytes = (size_t)(2 * d + 2) * sizeof(float);
+    lcr_batch_gdn_kernel<<<n_v, BATCH_BLOCK_SIZE, smem_bytes, c->stream>>>(
+        q, k, v, gate, beta, state, out, n_tokens, q_stride, kv_stride,
+        v_stride, g_stride, n_k, d);
+    return cudaGetLastError() == cudaSuccess ? BATCH_OK : BATCH_ERR_CUDA;
+}
+
+// One block per query head. Each token first publishes its k/v into the cache,
+// then runs the same online softmax as lcr_attn_kernel over the causal prefix.
+__global__ void lcr_batch_attn_kernel(const float *q, const float *k,
+                                      const float *v, const float *g,
+                                      float *kc, float *vc, float *out,
+                                      int n_tokens, int q_stride,
+                                      int kv_stride, int out_stride,
+                                      int n_heads, int n_kv, int d,
+                                      int seq_start, int seq_cap, float scale) {
+    __shared__ float tmp[BATCH_BLOCK_SIZE / 32];
+    extern __shared__ float acc[];
+    const int h = blockIdx.x;
+    const int kv = h * n_kv / n_heads;
+    const int tid = threadIdx.x;
+    const size_t kvbase = (size_t)kv * seq_cap * d;
+
+    for (int t = 0; t < n_tokens; ++t) {
+        const int pos = seq_start + t;
+        for (int j = tid; j < d; j += BATCH_BLOCK_SIZE) {
+            const size_t off = kvbase + (size_t)pos * d + j;
+            kc[off] = k[(size_t)t * kv_stride + (size_t)kv * d + j];
+            vc[off] = v[(size_t)t * kv_stride + (size_t)kv * d + j];
+            acc[j] = 0.0f;
+        }
+        __syncthreads();
+
+        const float *qt = q + (size_t)t * q_stride + (size_t)h * d;
+        float m = -INFINITY;
+        float s = 0.0f;
+        for (int p = 0; p <= pos; ++p) {
+            const float *kt = kc + kvbase + (size_t)p * d;
+            const float *vt = vc + kvbase + (size_t)p * d;
+            float part = 0.0f;
+            for (int j = tid; j < d; j += BATCH_BLOCK_SIZE) {
+                part += qt[j] * kt[j];
+            }
+            const float score = batch_block_sum(part, tmp) * scale;
+            const float m_new = fmaxf(m, score);
+            const float alpha = expf(m - m_new);
+            const float pw = expf(score - m_new);
+            for (int j = tid; j < d; j += BATCH_BLOCK_SIZE) {
+                acc[j] = acc[j] * alpha + pw * vt[j];
+            }
+            s = s * alpha + pw;
+            m = m_new;
+        }
+        const float inv = 1.0f / s;
+        const float *gt = g + (size_t)t * q_stride + (size_t)h * d;
+        float *ot = out + (size_t)t * out_stride + (size_t)h * d;
+        for (int j = tid; j < d; j += BATCH_BLOCK_SIZE) {
+            const float gate = 1.0f / (1.0f + expf(-gt[j]));
+            ot[j] = acc[j] * inv * gate;
+        }
+    }
+}
+
+int lcr_batch_attn(void *ctx, const float *q, const float *k, const float *v,
+                   const float *g, float *kc, float *vc, float *out,
+                   int n_tokens, int q_stride, int kv_stride, int out_stride,
+                   int n_heads, int n_kv, int d, int seq_start, int seq_cap,
+                   float scale) {
+    if (!ctx || !q || !k || !v || !g || !kc || !vc || !out || n_tokens <= 0 ||
+        n_heads <= 0 || n_kv <= 0 || d <= 0 || n_heads % n_kv != 0 ||
+        q_stride < n_heads * d || kv_stride < n_kv * d ||
+        out_stride < n_heads * d || seq_cap <= 0 || seq_start < 0 ||
+        seq_start + n_tokens > seq_cap) {
+        return BATCH_ERR_ARG;
+    }
+    BatchContext *c = (BatchContext *)ctx;
+    if (cudaSetDevice(c->device) != cudaSuccess) {
+        return BATCH_ERR_CUDA;
+    }
+    lcr_batch_attn_kernel<<<n_heads, BATCH_BLOCK_SIZE, (size_t)d * sizeof(float),
+                            c->stream>>>(
+        q, k, v, g, kc, vc, out, n_tokens, q_stride, kv_stride, out_stride,
+        n_heads, n_kv, d, seq_start, seq_cap, scale);
+    return cudaGetLastError() == cudaSuccess ? BATCH_OK : BATCH_ERR_CUDA;
+}

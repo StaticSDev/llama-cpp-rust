@@ -49,6 +49,60 @@ unsafe extern "C" {
         x_stride: c_int,
         out_stride: c_int,
     ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn lcr_batch_conv_silu(
+        ctx: *mut c_void,
+        w: *const f32,
+        hist: *mut f32,
+        qkv: *const f32,
+        out: *mut f32,
+        n_tokens: c_int,
+        qkv_stride: c_int,
+        out_stride: c_int,
+        channels: c_int,
+        k: c_int,
+        stride: c_int,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn lcr_batch_gdn(
+        ctx: *mut c_void,
+        q: *const f32,
+        k: *const f32,
+        v: *const f32,
+        gate: *const f32,
+        beta: *const f32,
+        state: *mut f32,
+        out: *mut f32,
+        n_tokens: c_int,
+        q_stride: c_int,
+        kv_stride: c_int,
+        v_stride: c_int,
+        g_stride: c_int,
+        n_v: c_int,
+        n_k: c_int,
+        d: c_int,
+    ) -> c_int;
+    #[allow(clippy::too_many_arguments)]
+    fn lcr_batch_attn(
+        ctx: *mut c_void,
+        q: *const f32,
+        k: *const f32,
+        v: *const f32,
+        g: *const f32,
+        kc: *mut f32,
+        vc: *mut f32,
+        out: *mut f32,
+        n_tokens: c_int,
+        q_stride: c_int,
+        kv_stride: c_int,
+        out_stride: c_int,
+        n_heads: c_int,
+        n_kv: c_int,
+        d: c_int,
+        seq_start: c_int,
+        seq_cap: c_int,
+        scale: f32,
+    ) -> c_int;
     fn lcr_gpu_read_i32(ctx: *mut c_void, src: *const c_void, dst: *mut c_int) -> c_int;
     fn lcr_gpu_sync(ctx: *mut c_void) -> c_int;
 
@@ -367,6 +421,89 @@ impl CudaWeights {
         let rc =
             unsafe { lcr_batch_matmul(self.ctx, index, x, out, n_tokens, x_stride, out_stride) };
         check_rc("lcr_batch_matmul", rc)
+    }
+
+    /// Sequential conv+SiLU over a chunk, updating conv history in place.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn batch_conv_silu(
+        &self,
+        w: *const f32,
+        hist: *mut f32,
+        qkv: *const f32,
+        out: *mut f32,
+        n_tokens: c_int,
+        qkv_stride: c_int,
+        out_stride: c_int,
+        channels: c_int,
+        k: c_int,
+        stride: c_int,
+    ) -> Result<()> {
+        let rc = unsafe {
+            lcr_batch_conv_silu(
+                self.ctx, w, hist, qkv, out, n_tokens, qkv_stride, out_stride, channels, k, stride,
+            )
+        };
+        check_rc("lcr_batch_conv_silu", rc)
+    }
+
+    /// Sequential GDN recurrence over a chunk; output token stride is `v_stride`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn batch_gdn(
+        &self,
+        q: *const f32,
+        k: *const f32,
+        v: *const f32,
+        gate: *const f32,
+        beta: *const f32,
+        state: *mut f32,
+        out: *mut f32,
+        n_tokens: c_int,
+        q_stride: c_int,
+        kv_stride: c_int,
+        v_stride: c_int,
+        g_stride: c_int,
+        n_v: c_int,
+        n_k: c_int,
+        d: c_int,
+    ) -> Result<()> {
+        let rc = unsafe {
+            lcr_batch_gdn(
+                self.ctx, q, k, v, gate, beta, state, out, n_tokens, q_stride, kv_stride, v_stride,
+                g_stride, n_v, n_k, d,
+            )
+        };
+        check_rc("lcr_batch_gdn", rc)
+    }
+
+    /// Batched KV cache store plus causal attention over a chunk.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn batch_attn(
+        &self,
+        q: *const f32,
+        k: *const f32,
+        v: *const f32,
+        g: *const f32,
+        kc: *mut f32,
+        vc: *mut f32,
+        out: *mut f32,
+        n_tokens: c_int,
+        q_stride: c_int,
+        kv_stride: c_int,
+        out_stride: c_int,
+        n_heads: c_int,
+        n_kv: c_int,
+        d: c_int,
+        seq_start: c_int,
+        seq_cap: c_int,
+        scale: f32,
+    ) -> Result<()> {
+        let rc = unsafe {
+            lcr_batch_attn(
+                self.ctx, q, k, v, g, kc, vc, out, n_tokens, q_stride, kv_stride, out_stride,
+                n_heads, n_kv, d, seq_start, seq_cap, scale,
+            )
+        };
+        check_rc("lcr_batch_attn", rc)
     }
 
     pub(crate) fn read_i32(&self, src: *const c_void, dst: &mut c_int) -> Result<()> {
