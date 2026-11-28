@@ -1,0 +1,8 @@
+Explain in one sentence why the sky is blue.
+Объясни одним предложением, почему небо голубое.
+Write Python: def add(a, b): return a + b  # explain the result
+A library opened in 1902 with 3000 books, grew to 2.4 million items by 2000, added three branches, and launched a digital archive in 2011 that now holds 18 million scanned pages. In what year did the archive launch and how many pages does it hold? Answer in one short sentence.
+Why?
+What is 17 times 24, and which primes are below 30?
+What does this mean: 😀?
+.
