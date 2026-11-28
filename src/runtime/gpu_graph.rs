@@ -39,7 +39,6 @@ struct Dims {
     vocab: i32,
     n_layer: usize,
     head_bytes: usize,
-    hist_bytes: usize,
 }
 
 struct CommonIdx {
@@ -127,6 +126,7 @@ pub struct GpuWorkspace {
     batch_norm: *mut f32,
     batch_norm2: *mut f32,
     batch_qkv: *mut f32,
+    batch_conv_out: *mut f32,
     batch_z: *mut f32,
     batch_gdn: *mut f32,
     batch_attn: *mut f32,
@@ -218,7 +218,6 @@ impl GpuWorkspace {
             vocab: to_i32(vocab, "vocab_size")?,
             n_layer: p.n_layer,
             head_bytes,
-            hist_bytes,
         };
 
         let resolve = |name: &str, in_dim: usize, out_dim: usize| -> Result<(i32, *mut c_void)> {
@@ -288,6 +287,12 @@ impl GpuWorkspace {
         let batch_qkv = alloc(
             checked_mul(PREFILL_CHUNK, qkv_floats, "batch qkv")?,
             "batch qkv",
+        )?;
+        // Conv output must stay separate from batch_qkv so the raw qkv row is
+        // still available to the history update.
+        let batch_conv_out = alloc(
+            checked_mul(PREFILL_CHUNK, channels, "batch conv out")?,
+            "batch conv out",
         )?;
         let batch_z = alloc(checked_mul(PREFILL_CHUNK, value_dim, "batch z")?, "batch z")?;
         let batch_gdn = alloc(
@@ -415,6 +420,7 @@ impl GpuWorkspace {
             batch_norm,
             batch_norm2,
             batch_qkv,
+            batch_conv_out,
             batch_z,
             batch_gdn,
             batch_attn,
@@ -499,6 +505,8 @@ impl GpuWorkspace {
                 )?;
 
                 let hist_cur = state.hist[state.cur].cast::<f32>();
+                // The conv kernel shifts hist_cur in place; keep using that
+                // buffer for the next token instead of copying it again.
                 cuda.op_conv_silu(
                     r.conv.cast::<f32>(),
                     hist_cur,
@@ -508,25 +516,6 @@ impl GpuWorkspace {
                     d.ksize,
                     d.channels,
                 )?;
-
-                if d.hist_bytes > 0 {
-                    let next = 1 - state.cur;
-                    let dst = state.hist[next].cast::<f32>();
-                    cuda.zero(state.hist[next], d.hist_bytes)?;
-                    if d.ksize > 2 {
-                        for j in 0..(d.ksize - 2) {
-                            let old = hist_cur.wrapping_add((j + 1) as usize * d.channels as usize);
-                            cuda.op_add(
-                                dst.wrapping_add(j as usize * d.channels as usize),
-                                old,
-                                d.channels,
-                            )?;
-                        }
-                    }
-                    let last = (d.ksize - 2) as usize * d.channels as usize;
-                    cuda.op_add(dst.wrapping_add(last), self.qkv, d.channels)?;
-                    state.cur = next;
-                }
 
                 cuda.op_l2norm_heads(self.conv_out, 2 * d.nk, d.ds, self.eps)?;
                 cuda.op_gdn_fused(
@@ -759,47 +748,30 @@ impl GpuWorkspace {
                         cuda.matvec2(r.beta, r.alpha, norm_i, self.beta_raw, self.alpha_raw)?;
 
                         let qkv_i = self.batch_qkv.wrapping_add(t * qkv_stride);
+                        let conv_i = self.batch_conv_out.wrapping_add(t * d.channels as usize);
                         let gdn_i = self.batch_gdn.wrapping_add(t * value_dim);
                         let hist_cur = state.hist[state.cur].cast::<f32>();
+                        // Conv output goes to its own row; qkv_i stays raw for
+                        // the in-place history shift performed by the kernel.
                         cuda.op_conv_silu(
                             r.conv.cast::<f32>(),
                             hist_cur,
                             qkv_i,
-                            self.conv_out,
+                            conv_i,
                             d.channels,
                             d.ksize,
                             d.channels,
                         )?;
 
-                        if d.hist_bytes > 0 {
-                            let next = 1 - state.cur;
-                            let dst = state.hist[next].cast::<f32>();
-                            cuda.zero(state.hist[next], d.hist_bytes)?;
-                            if d.ksize > 2 {
-                                for j in 0..(d.ksize - 2) {
-                                    let old = hist_cur
-                                        .wrapping_add((j + 1) as usize * d.channels as usize);
-                                    cuda.op_add(
-                                        dst.wrapping_add(j as usize * d.channels as usize),
-                                        old,
-                                        d.channels,
-                                    )?;
-                                }
-                            }
-                            let last = (d.ksize - 2) as usize * d.channels as usize;
-                            cuda.op_add(dst.wrapping_add(last), qkv_i, d.channels)?;
-                            state.cur = next;
-                        }
-
-                        cuda.op_l2norm_heads(self.conv_out, 2 * d.nk, d.ds, self.eps)?;
+                        cuda.op_l2norm_heads(conv_i, 2 * d.nk, d.ds, self.eps)?;
                         cuda.op_gdn_fused(
                             self.alpha_raw,
                             r.dt_bias.cast::<f32>(),
                             r.a.cast::<f32>(),
                             self.beta_raw,
-                            self.conv_out,
-                            self.conv_out.wrapping_add(d.key_dim as usize),
-                            self.conv_out.wrapping_add((2 * d.key_dim) as usize),
+                            conv_i,
+                            conv_i.wrapping_add(d.key_dim as usize),
+                            conv_i.wrapping_add((2 * d.key_dim) as usize),
                             state.state.cast::<f32>(),
                             gdn_i,
                             d.nv,
