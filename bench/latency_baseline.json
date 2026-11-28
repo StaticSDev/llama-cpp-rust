@@ -1,0 +1,74 @@
+{
+  "url": "http://127.0.0.1:8080",
+  "prompt_words": 40,
+  "prompt_chars": 249,
+  "runs": 2,
+  "samples": {
+    "10": [
+      {
+        "prompt_tokens": 78,
+        "prompt_ms": 8838,
+        "prompt_tok_s": 8.825526237487793,
+        "tokens": 1,
+        "gen_ms": 113,
+        "tok_s": 8.849557876586914,
+        "run": 1,
+        "n_predict": 10
+      },
+      {
+        "prompt_tokens": 78,
+        "prompt_ms": 8923,
+        "prompt_tok_s": 8.741455078125,
+        "tokens": 1,
+        "gen_ms": 112,
+        "tok_s": 8.928571701049805,
+        "run": 2,
+        "n_predict": 10
+      }
+    ],
+    "32": [
+      {
+        "prompt_tokens": 78,
+        "prompt_ms": 8800,
+        "prompt_tok_s": 8.863636016845703,
+        "tokens": 1,
+        "gen_ms": 113,
+        "tok_s": 8.849557876586914,
+        "run": 1,
+        "n_predict": 32
+      },
+      {
+        "prompt_tokens": 78,
+        "prompt_ms": 8819,
+        "prompt_tok_s": 8.8445405960083,
+        "tokens": 1,
+        "gen_ms": 113,
+        "tok_s": 8.849557876586914,
+        "run": 2,
+        "n_predict": 32
+      }
+    ]
+  },
+  "summary": {
+    "10": {
+      "prompt_tok_s": {
+        "mean": 8.78,
+        "min": 8.74
+      },
+      "tok_s": {
+        "mean": 8.89,
+        "min": 8.85
+      }
+    },
+    "32": {
+      "prompt_tok_s": {
+        "mean": 8.85,
+        "min": 8.84
+      },
+      "tok_s": {
+        "mean": 8.85,
+        "min": 8.85
+      }
+    }
+  }
+}
