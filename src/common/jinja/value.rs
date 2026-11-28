@@ -11,9 +11,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::runtime::Context;
 use super::string::{string_as_repr, JString, StringPart};
-use super::utils::{
-    parse_utf8_codepoint, JResult, JinjaError, Utf8Status, JINJA_RECURSIVE_LIMIT,
-};
+use super::utils::{parse_utf8_codepoint, JResult, JinjaError, Utf8Status, JINJA_RECURSIVE_LIMIT};
 use crate::json::Json;
 
 // ---------------------------------------------------------------------------
@@ -42,16 +40,42 @@ pub struct Stats {
 }
 
 pub enum ValueData {
-    Integer { val_int: i64, val_flt: f64 },
-    Real { val_int: i64, val_flt: f64 },
-    String { val_str: JString },
-    Boolean { val_int: i64, val_flt: f64 },
-    Array { items: Vec<Value>, immutable: bool },
-    Object { val_obj: Vec<(Value, Value)>, has_builtins: bool },
+    Integer {
+        val_int: i64,
+        val_flt: f64,
+    },
+    Real {
+        val_int: i64,
+        val_flt: f64,
+    },
+    String {
+        val_str: JString,
+    },
+    Boolean {
+        val_int: i64,
+        val_flt: f64,
+    },
+    Array {
+        items: Vec<Value>,
+        immutable: bool,
+    },
+    Object {
+        val_obj: Vec<(Value, Value)>,
+        has_builtins: bool,
+    },
     None,
-    Undefined { hint: String },
-    Function { func: FuncHandler, name: String, arg0: Option<Value> },
-    Keyword { key: String, val: Value },
+    Undefined {
+        hint: String,
+    },
+    Function {
+        func: FuncHandler,
+        name: String,
+        arg0: Option<Value>,
+    },
+    Keyword {
+        key: String,
+        val: Value,
+    },
 }
 
 pub struct ValueT {
@@ -71,12 +95,19 @@ pub type Value = Rc<RefCell<ValueT>>;
 pub fn mk_int(v: i64) -> Value {
     let mut val_flt = v as f64;
     if float_to_int(val_flt) != v {
-        val_flt = if v < 0 { f64::NEG_INFINITY } else { f64::INFINITY };
+        val_flt = if v < 0 {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
     }
     Rc::new(RefCell::new(ValueT {
         kind: ValueKind::Integer,
         stats: Stats::default(),
-        data: ValueData::Integer { val_int: v, val_flt },
+        data: ValueData::Integer {
+            val_int: v,
+            val_flt,
+        },
     }))
 }
 
@@ -85,7 +116,10 @@ pub fn mk_float(v: f64) -> Value {
     Rc::new(RefCell::new(ValueT {
         kind: ValueKind::Real,
         stats: Stats::default(),
-        data: ValueData::Real { val_int, val_flt: v },
+        data: ValueData::Real {
+            val_int,
+            val_flt: v,
+        },
     }))
 }
 
@@ -295,11 +329,9 @@ pub fn as_string(v: &Value) -> JResult<JString> {
             }
             Ok(JString::new(out))
         }
-        ValueData::Boolean { val_int, .. } => Ok(JString::new(if *val_int != 0 {
-            "True"
-        } else {
-            "False"
-        })),
+        ValueData::Boolean { val_int, .. } => {
+            Ok(JString::new(if *val_int != 0 { "True" } else { "False" }))
+        }
         ValueData::Array { items, immutable } => {
             let mut out = String::new();
             out.push(if *immutable { '(' } else { '[' });
@@ -336,7 +368,9 @@ pub fn as_string(v: &Value) -> JResult<JString> {
 pub fn as_bool(v: &Value) -> JResult<bool> {
     let b = v.borrow();
     match &b.data {
-        ValueData::Integer { val_int, .. } | ValueData::Boolean { val_int, .. } => Ok(*val_int != 0),
+        ValueData::Integer { val_int, .. } | ValueData::Boolean { val_int, .. } => {
+            Ok(*val_int != 0)
+        }
         ValueData::Real { val_flt, .. } => Ok(*val_flt != 0.0),
         ValueData::String { val_str } => Ok(!val_str.empty()),
         ValueData::Array { items, .. } => Ok(!items.is_empty()),
@@ -428,7 +462,9 @@ pub fn insert(v: &Value, key: Value, val: Value) -> JResult<()> {
         if !is_immutable(v) {
             // object and array are mutable; only object supports insert
             if !matches!(b.data, ValueData::Object { .. }) {
-                return Err(JinjaError::Error("Attempting to modify immutable type".into()));
+                return Err(JinjaError::Error(
+                    "Attempting to modify immutable type".into(),
+                ));
             }
         }
     }
@@ -443,7 +479,9 @@ pub fn insert(v: &Value, key: Value, val: Value) -> JResult<()> {
             }
             Ok(())
         }
-        _ => Err(JinjaError::Error("Attempting to modify immutable type".into())),
+        _ => Err(JinjaError::Error(
+            "Attempting to modify immutable type".into(),
+        )),
     }
 }
 
@@ -510,10 +548,17 @@ pub fn equivalent(a: &Value, b: &Value) -> bool {
     let bb = b.borrow();
     if ba.kind == bb.kind || (ba.kind == ValueKind::Array && bb.kind == ValueKind::Tuple) {
         match (&ba.data, &bb.data) {
-            (ValueData::Integer { val_int: ia, val_flt: fa }, _) if is_numeric(b) => {
+            (
+                ValueData::Integer {
+                    val_int: ia,
+                    val_flt: fa,
+                },
+                _,
+            ) if is_numeric(b) => {
                 let ib = match &bb.data {
-                    ValueData::Integer { val_int, .. }
-                    | ValueData::Boolean { val_int, .. } => *val_int,
+                    ValueData::Integer { val_int, .. } | ValueData::Boolean { val_int, .. } => {
+                        *val_int
+                    }
                     _ => 0,
                 };
                 let fb = match &bb.data {
@@ -524,10 +569,17 @@ pub fn equivalent(a: &Value, b: &Value) -> bool {
                 };
                 *ia == ib && *fa == fb
             }
-            (ValueData::Real { val_int: ia, val_flt: fa }, _) if is_numeric(b) => {
+            (
+                ValueData::Real {
+                    val_int: ia,
+                    val_flt: fa,
+                },
+                _,
+            ) if is_numeric(b) => {
                 let ib = match &bb.data {
-                    ValueData::Integer { val_int, .. }
-                    | ValueData::Boolean { val_int, .. } => *val_int,
+                    ValueData::Integer { val_int, .. } | ValueData::Boolean { val_int, .. } => {
+                        *val_int
+                    }
                     _ => 0,
                 };
                 let fb = match &bb.data {
@@ -538,10 +590,17 @@ pub fn equivalent(a: &Value, b: &Value) -> bool {
                 };
                 *ia == ib && *fa == fb
             }
-            (ValueData::Boolean { val_int: ia, val_flt: fa }, _) if is_numeric(b) => {
+            (
+                ValueData::Boolean {
+                    val_int: ia,
+                    val_flt: fa,
+                },
+                _,
+            ) if is_numeric(b) => {
                 let ib = match &bb.data {
-                    ValueData::Integer { val_int, .. }
-                    | ValueData::Boolean { val_int, .. } => *val_int,
+                    ValueData::Integer { val_int, .. } | ValueData::Boolean { val_int, .. } => {
+                        *val_int
+                    }
                     _ => 0,
                 };
                 let fb = match &bb.data {
@@ -552,9 +611,7 @@ pub fn equivalent(a: &Value, b: &Value) -> bool {
                 };
                 *ia == ib && *fa == fb
             }
-            (ValueData::String { val_str: sa }, ValueData::String { val_str: sb }) => {
-                sa.equals(sb)
-            }
+            (ValueData::String { val_str: sa }, ValueData::String { val_str: sb }) => sa.equals(sb),
             (ValueData::Array { items: aa, .. }, ValueData::Array { items: ab, .. }) => {
                 is_hashable(a)
                     && is_hashable(b)
@@ -572,7 +629,9 @@ pub fn equivalent(a: &Value, b: &Value) -> bool {
             }
             (ValueData::None, ValueData::None) => true,
             (ValueData::Undefined { .. }, ValueData::Undefined { .. }) => true,
-            (ValueData::Function { name: na, .. }, ValueData::Function { name: nb, .. }) => na == nb,
+            (ValueData::Function { name: na, .. }, ValueData::Function { name: nb, .. }) => {
+                na == nb
+            }
             (ValueData::Keyword { key: ka, val: va }, ValueData::Keyword { key: kb, val: vb }) => {
                 ka == kb && Rc::ptr_eq(va, vb)
             }
@@ -839,11 +898,7 @@ fn default_value(args: &FuncArgs) -> JResult<Value> {
     } else {
         is_undefined(&input) || is_none(&input)
     };
-    Ok(if no_value {
-        args.get_pos(1)?
-    } else {
-        input
-    })
+    Ok(if no_value { args.get_pos(1)? } else { input })
 }
 
 fn test_type(args: &FuncArgs, kinds: &[ValueKind]) -> JResult<Value> {
@@ -863,7 +918,13 @@ fn test_compare(args: &FuncArgs, op: ValueCompareOp) -> JResult<Value> {
 
 fn slice_generic<T: Clone>(array: &[T], start: i64, stop: i64, step: i64) -> Vec<T> {
     let len = array.len() as i64;
-    let direction = if step > 0 { 1 } else if step < 0 { -1 } else { 0 };
+    let direction = if step > 0 {
+        1
+    } else if step < 0 {
+        -1
+    } else {
+        0
+    };
     let mut start_val;
     let mut stop_val;
     if direction >= 0 {
@@ -928,9 +989,13 @@ fn get_attribute(val: &Value, attr: &Value, default: Value) -> Value {
                     .unwrap_or_else(|_| mk_undefined(""));
             }
         }
-        at(val, &idx, Some(default)).unwrap_or(None).unwrap_or(mk_undefined(""))
+        at(val, &idx, Some(default))
+            .unwrap_or(None)
+            .unwrap_or(mk_undefined(""))
     } else if kind_of(val) == ValueKind::Object {
-        at(val, attr, Some(default.clone())).unwrap_or(None).unwrap_or(default)
+        at(val, attr, Some(default.clone()))
+            .unwrap_or(None)
+            .unwrap_or(default)
     } else {
         default
     }
@@ -1000,7 +1065,9 @@ fn pop_array(v: &Value, index: i64) -> JResult<Value> {
     let mut b = v.borrow_mut();
     if let ValueData::Array { items, immutable } = &mut b.data {
         if *immutable {
-            return Err(JinjaError::Error("Attempting to modify immutable type".into()));
+            return Err(JinjaError::Error(
+                "Attempting to modify immutable type".into(),
+            ));
         }
         let mut idx = index;
         if idx < 0 {
@@ -1045,10 +1112,7 @@ fn float_repr(val: f64) -> String {
         let epos = buf.find('e').unwrap_or(buf.len());
         let (mantissa, exp_part) = buf.split_at(epos);
         let d: String = mantissa.chars().filter(|c| c.is_ascii_digit()).collect();
-        exp10 = exp_part
-            .trim_start_matches('e')
-            .parse::<i32>()
-            .unwrap_or(0);
+        exp10 = exp_part.trim_start_matches('e').parse::<i32>().unwrap_or(0);
         let reads_back = |cand: &str| -> bool {
             format!("{}e{}", cand, exp10 - prec as i32)
                 .parse::<f64>()
@@ -1270,7 +1334,15 @@ fn value_to_json_internal(
                 if indent > 0 {
                     out.push_str(&" ".repeat(indent as usize));
                 }
-                value_to_json_internal(out, item, curr_lvl + 1, indent, item_sep, key_sep, sort_keys);
+                value_to_json_internal(
+                    out,
+                    item,
+                    curr_lvl + 1,
+                    indent,
+                    item_sep,
+                    key_sep,
+                    sort_keys,
+                );
                 if i < arr.len() - 1 {
                     out.push_str(item_sep);
                 }
@@ -1313,7 +1385,15 @@ fn value_to_json_internal(
                     sort_keys,
                 );
                 out.push_str(key_sep);
-                value_to_json_internal(out, item, curr_lvl + 1, indent, item_sep, key_sep, sort_keys);
+                value_to_json_internal(
+                    out,
+                    item,
+                    curr_lvl + 1,
+                    indent,
+                    item_sep,
+                    key_sep,
+                    sort_keys,
+                );
                 if i < items.len() - 1 {
                     out.push_str(item_sep);
                 }
@@ -1446,7 +1526,9 @@ fn range_fn(args: &FuncArgs) -> JResult<Value> {
     };
     let out = mk_array();
     if step == 0 {
-        return Err(JinjaError::Raised("range() step argument must not be zero".into()));
+        return Err(JinjaError::Raised(
+            "range() step argument must not be zero".into(),
+        ));
     }
     if step > 0 {
         let mut i = start;
@@ -1565,7 +1647,37 @@ fn test_is_test(args: &FuncArgs) -> JResult<Value> {
     args.ensure_count(1, 1)?;
     args.ensure_val(0, ValueKind::String)?;
     let name = as_string(&args.get_pos(0)?)?.str();
-    Ok(mk_bool(global_builtin(&format!("test_is_{name}")).is_some()))
+    Ok(mk_bool(
+        global_builtin(&format!("test_is_{name}")).is_some(),
+    ))
+}
+
+/// `'name' is filter`: checks whether a filter name is registered.
+/// Uses the same aliases as `apply_filter_by_name`.
+fn test_is_filter(args: &FuncArgs) -> JResult<Value> {
+    args.ensure_count(1, 1)?;
+    args.ensure_val(0, ValueKind::String)?;
+    let raw = as_string(&args.get_pos(0)?)?.str();
+    let name = match raw.as_str() {
+        "count" => "length",
+        "d" => "default",
+        "e" => "escape",
+        "trim" => "strip",
+        other => other,
+    };
+    const KINDS: &[ValueKind] = &[
+        ValueKind::Integer,
+        ValueKind::Real,
+        ValueKind::String,
+        ValueKind::Boolean,
+        ValueKind::Array,
+        ValueKind::Tuple,
+        ValueKind::Object,
+        ValueKind::None,
+        ValueKind::Undefined,
+    ];
+    let exists = KINDS.iter().any(|k| type_builtin(*k, name).is_some());
+    Ok(mk_bool(exists))
 }
 
 type BuiltinFn = fn(&FuncArgs) -> JResult<Value>;
@@ -1667,12 +1779,9 @@ pub fn global_builtin(name: &str) -> Option<FuncHandler> {
         "test_is_in" => opt(test_in),
         "test_is_test" => opt(test_is_test),
         "test_is_sameas" => opt(test_sameas),
-        "test_is_escaped" => opt(|_: &FuncArgs| {
-            Err(JinjaError::NotImplemented("escaped test not implemented".into()))
-        }),
-        "test_is_filter" => opt(|_: &FuncArgs| {
-            Err(JinjaError::NotImplemented("filter test not implemented".into()))
-        }),
+        // This engine has no Markup type; strings are the safe/escaped values.
+        "test_is_escaped" => opt(|a| test_type(a, &[ValueKind::String])),
+        "test_is_filter" => opt(test_is_filter),
         _ => None,
     }?;
     Some(h(f))
@@ -1752,7 +1861,12 @@ pub fn find_builtin_func(_ctx: &Context, name: &str, input: &Value) -> Option<Va
     Some(mk_func(name, handler, Some(input.clone())))
 }
 
-pub fn try_builtin_func(ctx: &Context, name: &str, input: &Value, undef_on_missing: bool) -> JResult<Value> {
+pub fn try_builtin_func(
+    ctx: &Context,
+    name: &str,
+    input: &Value,
+    undef_on_missing: bool,
+) -> JResult<Value> {
     if let Some(func) = find_builtin_func(ctx, name, input) {
         return Ok(func);
     }
@@ -1766,7 +1880,12 @@ pub fn try_builtin_func(ctx: &Context, name: &str, input: &Value, undef_on_missi
     )))
 }
 
-pub fn apply_filter_by_name(ctx: &Context, mut filter_id: String, mut input: Value, args: &FuncArgs) -> JResult<Value> {
+pub fn apply_filter_by_name(
+    ctx: &Context,
+    mut filter_id: String,
+    mut input: Value,
+    args: &FuncArgs,
+) -> JResult<Value> {
     filter_id = match filter_id.as_str() {
         "count" => "length".into(),
         "d" => "default".into(),
@@ -1883,9 +2002,7 @@ fn type_builtin(kind: ValueKind, name: &str) -> Option<FuncHandler> {
             }),
             "tojson" => opt(tojson),
             "indent" => opt(string_indent),
-            "join" => opt(|_: &FuncArgs| {
-                Err(JinjaError::NotImplemented("String join builtin not implemented".into()))
-            }),
+            "join" => opt(string_join),
             _ => None,
         },
         ValueKind::Array | ValueKind::Tuple => match name {
@@ -1940,9 +2057,7 @@ fn type_builtin(kind: ValueKind, name: &str) -> Option<FuncHandler> {
                 Ok(mk_int(as_ordered_object(&a.get_pos(0)?)?.len() as i64))
             }),
             "dictsort" => opt(object_dictsort),
-            "join" => opt(|_: &FuncArgs| {
-                Err(JinjaError::NotImplemented("object join not implemented".into()))
-            }),
+            "join" => opt(object_join),
             _ => None,
         },
         ValueKind::None => match name {
@@ -2054,7 +2169,9 @@ fn strip_args(a: &FuncArgs, allowed: &[&str]) -> JResult<(JString, Option<String
     a.ensure_count(1, 2)?;
     let input = a.get_pos(0)?;
     if kind_of(&input) != ValueKind::String {
-        return Err(JinjaError::Raised("strip() first argument must be a string".into()));
+        return Err(JinjaError::Raised(
+            "strip() first argument must be a string".into(),
+        ));
     }
     let chars = a.get_kwarg_or_pos("chars", 1);
     let chars = if is_undefined(&chars) {
@@ -2197,26 +2314,32 @@ fn string_replace(a: &FuncArgs) -> JResult<Value> {
     } else {
         -1
     };
-    if count > 0 {
-        return Err(JinjaError::NotImplemented(
-            "String replace with count argument not implemented".into(),
-        ));
-    }
+    // Python/Jinja str.replace: a negative count means "all occurrences".
+    let mut done = 0i64;
     if old != new {
         if old.is_empty() {
             let mut res = String::new();
-            res.push_str(&new);
             for c in s.chars() {
+                if count < 0 || done < count {
+                    res.push_str(&new);
+                    done += 1;
+                }
                 res.push(c);
+            }
+            if count < 0 || done < count {
                 res.push_str(&new);
             }
             s = res;
         } else {
             let mut pos = 0;
-            while let Some(rel) = s[pos..].find(&old) {
+            while count < 0 || done < count {
+                let Some(rel) = s[pos..].find(&old) else {
+                    break;
+                };
                 let at = pos + rel;
                 s.replace_range(at..at + old.len(), &new);
                 pos = at + new.len();
+                done += 1;
             }
         }
     }
@@ -2234,7 +2357,9 @@ fn string_replace(a: &FuncArgs) -> JResult<Value> {
 fn string_format(a: &FuncArgs) -> JResult<Value> {
     let input = a.get_pos(0)?;
     if kind_of(&input) != ValueKind::String {
-        return Err(JinjaError::Raised("format() first argument must be a string".into()));
+        return Err(JinjaError::Raised(
+            "format() first argument must be a string".into(),
+        ));
     }
     let fmt = as_string(&input)?;
     let fmt_is_input = fmt.all_parts_are_input();
@@ -2348,22 +2473,24 @@ fn string_int(a: &FuncArgs) -> JResult<Value> {
         as_int(&base_val)? as i32
     };
     if base != 0 && !(2..=36).contains(&base) {
-        return Err(JinjaError::Raised("int() base must be 0 or between 2 and 36".into()));
+        return Err(JinjaError::Raised(
+            "int() base must be 0 or between 2 and 36".into(),
+        ));
     }
     if kind_of(&input) != ValueKind::String {
-        return Err(JinjaError::Raised("int() first argument must be a string".into()));
+        return Err(JinjaError::Raised(
+            "int() first argument must be a string".into(),
+        ));
     }
     let s = as_string(&input)?.str();
     Ok(mk_int(
-        parse_int_base(&s, base)
-            .map(i64::from)
-            .unwrap_or_else(|| {
-                if is_undefined(&default) {
-                    0
-                } else {
-                    as_int(&default).unwrap_or(0)
-                }
-            }),
+        parse_int_base(&s, base).map(i64::from).unwrap_or_else(|| {
+            if is_undefined(&default) {
+                0
+            } else {
+                as_int(&default).unwrap_or(0)
+            }
+        }),
     ))
 }
 
@@ -2372,15 +2499,13 @@ fn string_float(a: &FuncArgs) -> JResult<Value> {
     a.ensure_val(0, ValueKind::String)?;
     let default = a.get_kwarg_or_pos("default", 1);
     let s = as_string(&a.get_pos(0)?)?.str();
-    Ok(mk_float(
-        lenient_float(&s).unwrap_or_else(|| {
-            if is_undefined(&default) {
-                0.0
-            } else {
-                as_float(&default).unwrap_or(0.0)
-            }
-        }),
-    ))
+    Ok(mk_float(lenient_float(&s).unwrap_or_else(|| {
+        if is_undefined(&default) {
+            0.0
+        } else {
+            as_float(&default).unwrap_or(0.0)
+        }
+    })))
 }
 
 fn string_slice(a: &FuncArgs) -> JResult<Value> {
@@ -2424,7 +2549,9 @@ fn string_indent(a: &FuncArgs) -> JResult<Value> {
     let first = as_bool(&a.get_kwarg_or_pos("first", 2))?;
     let blank = as_bool(&a.get_kwarg_or_pos("blank", 3))?;
     if kind_of(&input) != ValueKind::String {
-        return Err(JinjaError::Raised("indent() first argument must be a string".into()));
+        return Err(JinjaError::Raised(
+            "indent() first argument must be a string".into(),
+        ));
     }
     let indent = if kind_of(&width) == ValueKind::Integer {
         " ".repeat(as_int(&width)?.max(0) as usize)
@@ -2459,6 +2586,48 @@ fn string_indent(a: &FuncArgs) -> JResult<Value> {
         }
     }
     Ok(val)
+}
+
+/// `separator.join(iterable)`: the string value is the separator.
+fn string_join(a: &FuncArgs) -> JResult<Value> {
+    a.ensure_kwargs(&["attribute"])?;
+    a.ensure_count(2, 3)?;
+    let sep_val = a.get_pos(0)?;
+    if kind_of(&sep_val) != ValueKind::String {
+        return Err(JinjaError::Raised(
+            "join() first argument must be a string".into(),
+        ));
+    }
+    let sep = as_string(&sep_val)?.str();
+    let input = a.get_pos(1)?;
+    if !is_val(&input, ValueKind::Array) {
+        return Err(JinjaError::Raised(
+            "join() second argument must be an array".into(),
+        ));
+    }
+    let attribute = a.get_kwarg_or_pos("attribute", 2);
+    let undef = mk_undefined("");
+    let arr = as_array(&input)?;
+    let mut result = String::new();
+    for (i, item) in arr.iter().enumerate() {
+        let mut val = item.clone();
+        if !is_undefined(&attribute) {
+            val = get_attribute(&val, &attribute, undef.clone());
+        }
+        if !is_val(&val, ValueKind::String)
+            && !is_val(&val, ValueKind::Integer)
+            && !is_val(&val, ValueKind::Real)
+        {
+            return Err(JinjaError::Raised(
+                "join() can only join arrays of strings or numerics".into(),
+            ));
+        }
+        result.push_str(&as_string(&val)?.str());
+        if i < arr.len() - 1 {
+            result.push_str(&sep);
+        }
+    }
+    Ok(mk_string(result))
 }
 
 fn array_list(a: &FuncArgs) -> JResult<Value> {
@@ -2530,7 +2699,9 @@ fn array_join(a: &FuncArgs) -> JResult<Value> {
     a.ensure_count(1, 3)?;
     let input = a.get_pos(0)?;
     if !is_val(&input, ValueKind::Array) {
-        return Err(JinjaError::Raised("join() first argument must be an array".into()));
+        return Err(JinjaError::Raised(
+            "join() first argument must be an array".into(),
+        ));
     }
     let delim_val = a.get_kwarg_or_pos("d", 1);
     let attribute = a.get_kwarg_or_pos("attribute", 2);
@@ -2576,12 +2747,16 @@ fn array_map(a: &FuncArgs) -> JResult<Value> {
     a.ensure_count(2, 999)?;
     let val = a.get_pos(0)?;
     if !is_val(&val, ValueKind::Array) {
-        return Err(JinjaError::Raised("map: first argument must be an array".into()));
+        return Err(JinjaError::Raised(
+            "map: first argument must be an array".into(),
+        ));
     }
     if kind_of(&a.get_args()[1]) != ValueKind::Keyword {
         let filter = a.get_pos(1)?;
         if kind_of(&filter) != ValueKind::String {
-            return Err(JinjaError::Raised("map: filter name must be a string".into()));
+            return Err(JinjaError::Raised(
+                "map: filter name must be a string".into(),
+            ));
         }
         let mut filter_args = FuncArgs::new(a.ctx);
         for arg in a.get_args().iter().skip(2) {
@@ -2616,7 +2791,9 @@ fn array_append(a: &FuncArgs) -> JResult<Value> {
     a.ensure_count(2, 2)?;
     let val = a.get_pos(0)?;
     if !is_val(&val, ValueKind::Array) {
-        return Err(JinjaError::Raised("append: first argument must be an array".into()));
+        return Err(JinjaError::Raised(
+            "append: first argument must be an array".into(),
+        ));
     }
     push_array(&val, a.get_pos(1)?);
     Ok(val)
@@ -2640,7 +2817,9 @@ fn array_sort(a: &FuncArgs) -> JResult<Value> {
     a.ensure_count(1, 4)?;
     let val = a.get_pos(0)?;
     if !is_val(&val, ValueKind::Array) {
-        return Err(JinjaError::Raised("sort: first argument must be an array".into()));
+        return Err(JinjaError::Raised(
+            "sort: first argument must be an array".into(),
+        ));
     }
     let reverse = as_bool(&a.get_kwarg_or_pos("reverse", 1))?;
     let attribute = a.get_kwarg_or_pos("attribute", 3);
@@ -2655,9 +2834,25 @@ fn array_sort(a: &FuncArgs) -> JResult<Value> {
                 get_attribute(y, &attribute, undef.clone()),
             )
         };
-        if value_compare(&a, &b, if reverse { ValueCompareOp::Gt } else { ValueCompareOp::Lt }) {
+        if value_compare(
+            &a,
+            &b,
+            if reverse {
+                ValueCompareOp::Gt
+            } else {
+                ValueCompareOp::Lt
+            },
+        ) {
             std::cmp::Ordering::Less
-        } else if value_compare(&a, &b, if reverse { ValueCompareOp::Lt } else { ValueCompareOp::Gt }) {
+        } else if value_compare(
+            &a,
+            &b,
+            if reverse {
+                ValueCompareOp::Lt
+            } else {
+                ValueCompareOp::Gt
+            },
+        ) {
             std::cmp::Ordering::Greater
         } else {
             std::cmp::Ordering::Equal
@@ -2806,9 +3001,25 @@ fn object_dictsort(a: &FuncArgs) -> JResult<Value> {
         } else {
             (x.0.clone(), y.0.clone())
         };
-        if value_compare(&a, &b, if reverse { ValueCompareOp::Gt } else { ValueCompareOp::Lt }) {
+        if value_compare(
+            &a,
+            &b,
+            if reverse {
+                ValueCompareOp::Gt
+            } else {
+                ValueCompareOp::Lt
+            },
+        ) {
             std::cmp::Ordering::Less
-        } else if value_compare(&a, &b, if reverse { ValueCompareOp::Lt } else { ValueCompareOp::Gt }) {
+        } else if value_compare(
+            &a,
+            &b,
+            if reverse {
+                ValueCompareOp::Lt
+            } else {
+                ValueCompareOp::Gt
+            },
+        ) {
             std::cmp::Ordering::Greater
         } else {
             std::cmp::Ordering::Equal
@@ -2818,6 +3029,33 @@ fn object_dictsort(a: &FuncArgs) -> JResult<Value> {
         insert(&out, k, v).ok();
     }
     Ok(out)
+}
+
+/// Join an object's keys with a separator (Python `sep.join(dict)`).
+fn object_join(a: &FuncArgs) -> JResult<Value> {
+    a.ensure_kwargs(&["d", "attribute"])?;
+    a.ensure_count(1, 3)?;
+    let input = a.get_pos(0)?;
+    if kind_of(&input) != ValueKind::Object {
+        return Err(JinjaError::Raised(
+            "join() first argument must be an object".into(),
+        ));
+    }
+    let delim_val = a.get_kwarg_or_pos("d", 1);
+    let delim = if is_undefined(&delim_val) {
+        String::new()
+    } else {
+        as_string(&delim_val)?.str()
+    };
+    let pairs = as_ordered_object(&input)?;
+    let mut result = String::new();
+    for (i, (key, _)) in pairs.iter().enumerate() {
+        result.push_str(&as_string(key)?.str());
+        if i < pairs.len() - 1 {
+            result.push_str(&delim);
+        }
+    }
+    Ok(mk_string(result))
 }
 
 // ---------------------------------------------------------------------------
@@ -2833,11 +3071,27 @@ fn format_time(fmt: &str, epoch: i64) -> String {
     let second = secs % 60;
     let weekday = (days + 4).rem_euclid(7) as usize; // 0 = Sunday
     let month_names = [
-        "January", "February", "March", "April", "May", "June", "July", "August", "September",
-        "October", "November", "December",
+        "January",
+        "February",
+        "March",
+        "April",
+        "May",
+        "June",
+        "July",
+        "August",
+        "September",
+        "October",
+        "November",
+        "December",
     ];
     let day_names = [
-        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday",
+        "Sunday",
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
     ];
     let mut out = String::new();
     let mut chars = fmt.chars().peekable();
@@ -2870,8 +3124,8 @@ fn format_time(fmt: &str, epoch: i64) -> String {
                 out.push_str(&format!("{short_year:02}/{month:02}/{day:02}"));
             }
             'j' => {
-                let ordinal = day
-                    + match month {
+                let ordinal =
+                    day + match month {
                         1 => 0,
                         2 => 31,
                         3 => 59,
@@ -2884,8 +3138,7 @@ fn format_time(fmt: &str, epoch: i64) -> String {
                         10 => 273,
                         11 => 304,
                         _ => 334,
-                    }
-                    + if month > 2 && is_leap(year) { 1 } else { 0 };
+                    } + if month > 2 && is_leap(year) { 1 } else { 0 };
                 out.push_str(&format!("{ordinal:03}"));
             }
             'n' => out.push('\n'),
@@ -2976,4 +3229,175 @@ pub fn global_from_json(ctx: &mut Context, json_obj: &Json, mark_input: bool) ->
 #[allow(dead_code)]
 pub fn global_builtin_names() -> &'static [&'static str] {
     NAMES
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ctx() -> Context {
+        Context::new(String::new())
+    }
+
+    fn args(c: &Context, vals: Vec<Value>) -> FuncArgs<'_> {
+        let mut a = FuncArgs::new(c);
+        for v in vals {
+            a.push_back(v);
+        }
+        a
+    }
+
+    fn apply(name: &str, input: Value, vals: Vec<Value>) -> JResult<Value> {
+        let c = ctx();
+        let a = args(&c, vals);
+        apply_filter_by_name(&c, name.to_string(), input, &a)
+    }
+
+    fn test(name: &str, vals: Vec<Value>) -> JResult<Value> {
+        let c = ctx();
+        let a = args(&c, vals);
+        global_builtin(name).unwrap()(&a)
+    }
+
+    fn text(v: JResult<Value>) -> String {
+        as_string(&v.expect("expected success"))
+            .expect("expected string")
+            .str()
+    }
+
+    fn obj(pairs: &[(&str, &str)]) -> Value {
+        let o = mk_object();
+        for (k, v) in pairs {
+            insert_str(&o, k, mk_string(*v)).unwrap();
+        }
+        o
+    }
+
+    #[test]
+    fn string_join_uses_separator() {
+        let arr = mk_array_from(vec![mk_string("a"), mk_string("b"), mk_string("c")]);
+        assert_eq!(text(apply("join", mk_string("-"), vec![arr])), "a-b-c");
+    }
+
+    #[test]
+    fn string_join_empty_array() {
+        assert_eq!(text(apply("join", mk_string("-"), vec![mk_array()])), "");
+    }
+
+    #[test]
+    fn string_join_numeric_items() {
+        let arr = mk_array_from(vec![mk_int(1), mk_float(2.5)]);
+        assert_eq!(text(apply("join", mk_string(","), vec![arr])), "1,2.5");
+    }
+
+    #[test]
+    fn string_join_missing_iterable_errors() {
+        assert!(apply("join", mk_string("-"), vec![]).is_err());
+    }
+
+    #[test]
+    fn string_join_rejects_unsupported_item() {
+        let arr = mk_array_from(vec![mk_string("a"), mk_object()]);
+        assert!(apply("join", mk_string("-"), vec![arr]).is_err());
+    }
+
+    #[test]
+    fn object_join_joins_keys() {
+        let o = obj(&[("a", "1"), ("b", "2"), ("c", "3")]);
+        assert_eq!(text(apply("join", o, vec![mk_string(", ")])), "a, b, c");
+    }
+
+    #[test]
+    fn object_join_empty_and_default_separator() {
+        assert_eq!(text(apply("join", mk_object(), vec![mk_string("-")])), "");
+        assert_eq!(
+            text(apply("join", obj(&[("a", "1"), ("b", "2")]), vec![])),
+            "ab"
+        );
+    }
+
+    #[test]
+    fn replace_all_by_default() {
+        assert_eq!(
+            text(apply(
+                "replace",
+                mk_string("a-b-a"),
+                vec![mk_string("a"), mk_string("X")]
+            )),
+            "X-b-X"
+        );
+    }
+
+    #[test]
+    fn replace_honors_positive_count() {
+        let base = vec![mk_string("a"), mk_string("X")];
+        let mut one = base.clone();
+        one.push(mk_int(1));
+        assert_eq!(text(apply("replace", mk_string("a-a-a"), one)), "X-a-a");
+        let mut two = base;
+        two.push(mk_int(2));
+        assert_eq!(text(apply("replace", mk_string("a-a-a"), two)), "X-X-a");
+    }
+
+    #[test]
+    fn replace_zero_and_negative_count() {
+        let mut zero = vec![mk_string("a"), mk_string("X"), mk_int(0)];
+        assert_eq!(
+            text(apply("replace", mk_string("a-a"), zero.clone())),
+            "a-a"
+        );
+        zero.pop();
+        zero.push(mk_int(-3));
+        assert_eq!(text(apply("replace", mk_string("a-a"), zero)), "X-X");
+    }
+
+    #[test]
+    fn replace_empty_old_with_count() {
+        let mut args = vec![mk_string(""), mk_string("-"), mk_int(2)];
+        assert_eq!(
+            text(apply("replace", mk_string("abc"), args.clone())),
+            "-a-bc"
+        );
+        args.pop();
+        assert_eq!(text(apply("replace", mk_string("abc"), args)), "-a-b-c-");
+    }
+
+    #[test]
+    fn replace_wrong_args_error() {
+        assert!(apply("replace", mk_string("abc"), vec![mk_string("a")]).is_err());
+        assert!(apply(
+            "replace",
+            mk_string("abc"),
+            vec![mk_string("a"), mk_string("X"), mk_string("1")]
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn escaped_test_string_only() {
+        assert!(as_bool(&test("test_is_escaped", vec![mk_string("x")]).unwrap()).unwrap());
+        assert!(!as_bool(&test("test_is_escaped", vec![mk_int(1)]).unwrap()).unwrap());
+        assert!(!as_bool(&test("test_is_escaped", vec![mk_undefined("")]).unwrap()).unwrap());
+    }
+
+    #[test]
+    fn filter_test_checks_registered_filters() {
+        for (name, expected) in [
+            ("upper", true),
+            ("count", true),
+            ("trim", true),
+            ("join", true),
+            ("nope", false),
+            ("range", false),
+        ] {
+            let got = as_bool(&test("test_is_filter", vec![mk_string(name)]).unwrap()).unwrap();
+            assert_eq!(got, expected, "filter '{name}'");
+        }
+    }
+
+    #[test]
+    fn filter_test_requires_string_name() {
+        assert!(test("test_is_filter", vec![]).is_err());
+        assert!(test("test_is_filter", vec![mk_int(1)]).is_err());
+    }
 }
