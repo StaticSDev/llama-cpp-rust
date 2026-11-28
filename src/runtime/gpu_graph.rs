@@ -442,18 +442,7 @@ impl GpuWorkspace {
                     state.cur = next;
                 }
 
-                for h in 0..d.nk {
-                    cuda.op_l2norm(
-                        self.conv_out.wrapping_add((h * d.ds) as usize),
-                        d.ds,
-                        self.eps,
-                    )?;
-                    cuda.op_l2norm(
-                        self.conv_out.wrapping_add((d.key_dim + h * d.ds) as usize),
-                        d.ds,
-                        self.eps,
-                    )?;
-                }
+                cuda.op_l2norm_heads(self.conv_out, 2 * d.nk, d.ds, self.eps)?;
                 cuda.op_gdn(
                     self.conv_out,
                     self.conv_out.wrapping_add(d.key_dim as usize),
@@ -466,12 +455,15 @@ impl GpuWorkspace {
                     d.nk,
                     d.ds,
                 )?;
-                for h in 0..d.nv {
-                    let head = self.gdn_out.wrapping_add((h * d.ds) as usize);
-                    let z_head = self.z.wrapping_add((h * d.ds) as usize);
-                    cuda.op_rmsnorm(head, r.norm.cast::<f32>(), head, d.ds, self.eps)?;
-                    cuda.op_silu_mul(z_head, head, head, d.ds)?;
-                }
+                cuda.op_gdn_post(
+                    self.gdn_out,
+                    self.z,
+                    r.norm.cast::<f32>(),
+                    self.gdn_out,
+                    d.nv,
+                    d.ds,
+                    self.eps,
+                )?;
                 cuda.matvec_device(r.out, self.gdn_out, self.attn)?;
                 li += 1;
             } else {
@@ -483,22 +475,27 @@ impl GpuWorkspace {
                 cuda.matvec_device(f.q, self.norm, self.qkv)?;
                 cuda.zero(self.heads.cast::<c_void>(), d.head_bytes)?;
                 cuda.zero(self.gates.cast::<c_void>(), d.head_bytes)?;
-                for h in 0..d.n_head {
-                    let base = (h * 2 * d.hd) as usize;
-                    let q = self.heads.wrapping_add((h * d.hd) as usize);
-                    let g = self.gates.wrapping_add((h * d.hd) as usize);
-                    cuda.op_add(q, self.qkv.wrapping_add(base), d.hd)?;
-                    cuda.op_add(g, self.qkv.wrapping_add(base + d.hd as usize), d.hd)?;
-                    cuda.op_rmsnorm(q, f.q_norm.cast::<f32>(), q, d.hd, self.eps)?;
-                    cuda.op_rope(q, d.hd, self.n_rot, self.rope_base, pos as i32)?;
-                }
+                cuda.op_split_qg(self.qkv, self.heads, self.gates, d.n_head, d.hd)?;
+                cuda.op_qk_norm_rope(
+                    self.heads,
+                    f.q_norm.cast::<f32>(),
+                    d.n_head,
+                    d.hd,
+                    self.n_rot,
+                    self.rope_base,
+                    pos as i32,
+                )?;
                 cuda.matvec_device(f.k, self.norm, self.head_k)?;
                 cuda.matvec_device(f.v, self.norm, self.head_v)?;
-                for h in 0..d.n_kv {
-                    let k = self.head_k.wrapping_add((h * d.hd) as usize);
-                    cuda.op_rmsnorm(k, f.k_norm.cast::<f32>(), k, d.hd, self.eps)?;
-                    cuda.op_rope(k, d.hd, self.n_rot, self.rope_base, pos as i32)?;
-                }
+                cuda.op_qk_norm_rope(
+                    self.head_k,
+                    f.k_norm.cast::<f32>(),
+                    d.n_kv,
+                    d.hd,
+                    self.n_rot,
+                    self.rope_base,
+                    pos as i32,
+                )?;
                 cuda.op_attn(
                     self.heads,
                     self.head_k,
@@ -543,6 +540,7 @@ impl GpuWorkspace {
         cuda.matvec_device(self.emb_idx, self.h, self.logits)?;
         cuda.op_argmax(self.logits, d.vocab, self.argmax.cast::<i32>())?;
         let mut next = 0i32;
+        cuda.sync()?;
         cuda.read_i32(self.argmax.cast_const().cast::<c_void>(), &mut next)?;
         Ok(next)
     }

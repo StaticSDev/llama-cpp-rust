@@ -41,6 +41,7 @@ unsafe extern "C" {
     fn lcr_gpu_matvec_device(ctx: *mut c_void, index: c_int, x: *const f32, out: *mut f32)
         -> c_int;
     fn lcr_gpu_read_i32(ctx: *mut c_void, src: *const c_void, dst: *mut c_int) -> c_int;
+    fn lcr_gpu_sync(ctx: *mut c_void) -> c_int;
 
     // Device-resident elementwise and block kernels.
     fn lcr_op_rmsnorm(
@@ -117,6 +118,42 @@ unsafe extern "C" {
         seq_pos: c_int,
         seq_cap: c_int,
         scale: f32,
+    ) -> c_int;
+    // Fused per-head kernels.
+    fn lcr_op_split_qg(
+        ctx: *mut c_void,
+        qg: *const f32,
+        q: *mut f32,
+        g: *mut f32,
+        n_heads: c_int,
+        head_dim: c_int,
+    ) -> c_int;
+    fn lcr_op_qk_norm_rope(
+        ctx: *mut c_void,
+        x: *mut f32,
+        w: *const f32,
+        n_heads: c_int,
+        head_dim: c_int,
+        n_rot: c_int,
+        base: f32,
+        pos: c_int,
+    ) -> c_int;
+    fn lcr_op_l2norm_heads(
+        ctx: *mut c_void,
+        x: *mut f32,
+        n_heads: c_int,
+        head_dim: c_int,
+        eps: f32,
+    ) -> c_int;
+    fn lcr_op_gdn_post(
+        ctx: *mut c_void,
+        gdn: *const f32,
+        z: *const f32,
+        norm_w: *const f32,
+        y: *mut f32,
+        n_heads: c_int,
+        head_dim: c_int,
+        eps: f32,
     ) -> c_int;
     fn lcr_op_argmax(ctx: *mut c_void, x: *const f32, n: c_int, out: *mut c_int) -> c_int;
 }
@@ -313,6 +350,11 @@ impl CudaWeights {
         check_rc("lcr_gpu_read_i32", rc)
     }
 
+    pub(crate) fn sync(&self) -> Result<()> {
+        let rc = unsafe { lcr_gpu_sync(self.ctx) };
+        check_rc("lcr_gpu_sync", rc)
+    }
+
     pub(crate) fn op_rmsnorm(
         &self,
         x: *const f32,
@@ -325,11 +367,13 @@ impl CudaWeights {
         check_rc("lcr_op_rmsnorm", rc)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn op_l2norm(&self, x: *mut f32, n: c_int, eps: f32) -> Result<()> {
         let rc = unsafe { lcr_op_l2norm(self.ctx, x, n, eps) };
         check_rc("lcr_op_l2norm", rc)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn op_rope(
         &self,
         x: *mut f32,
@@ -440,6 +484,58 @@ impl CudaWeights {
             )
         };
         check_rc("lcr_op_attn", rc)
+    }
+
+    pub(crate) fn op_split_qg(
+        &self,
+        qg: *const f32,
+        q: *mut f32,
+        g: *mut f32,
+        n_heads: c_int,
+        head_dim: c_int,
+    ) -> Result<()> {
+        let rc = unsafe { lcr_op_split_qg(self.ctx, qg, q, g, n_heads, head_dim) };
+        check_rc("lcr_op_split_qg", rc)
+    }
+
+    pub(crate) fn op_qk_norm_rope(
+        &self,
+        x: *mut f32,
+        w: *const f32,
+        n_heads: c_int,
+        head_dim: c_int,
+        n_rot: c_int,
+        base: f32,
+        pos: c_int,
+    ) -> Result<()> {
+        let rc =
+            unsafe { lcr_op_qk_norm_rope(self.ctx, x, w, n_heads, head_dim, n_rot, base, pos) };
+        check_rc("lcr_op_qk_norm_rope", rc)
+    }
+
+    pub(crate) fn op_l2norm_heads(
+        &self,
+        x: *mut f32,
+        n_heads: c_int,
+        head_dim: c_int,
+        eps: f32,
+    ) -> Result<()> {
+        let rc = unsafe { lcr_op_l2norm_heads(self.ctx, x, n_heads, head_dim, eps) };
+        check_rc("lcr_op_l2norm_heads", rc)
+    }
+
+    pub(crate) fn op_gdn_post(
+        &self,
+        gdn: *const f32,
+        z: *const f32,
+        norm_w: *const f32,
+        y: *mut f32,
+        n_heads: c_int,
+        head_dim: c_int,
+        eps: f32,
+    ) -> Result<()> {
+        let rc = unsafe { lcr_op_gdn_post(self.ctx, gdn, z, norm_w, y, n_heads, head_dim, eps) };
+        check_rc("lcr_op_gdn_post", rc)
     }
 
     pub(crate) fn op_argmax(&self, x: *const f32, n: c_int, out: *mut c_int) -> Result<()> {
