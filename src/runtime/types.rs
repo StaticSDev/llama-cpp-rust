@@ -1,7 +1,9 @@
 //! Shared types for the small CPU inference runtime.
 
-use crate::core::{Error, Result};
+use crate::core::{Error, Mt19937, Result};
 use crate::gguf::{ggml_blck_size, ggml_type_size, GgmlType};
+#[cfg(feature = "cuda")]
+use crate::runtime::gpu_graph::GpuWorkspace;
 use crate::vocab::LlamaVocab;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -86,6 +88,8 @@ pub struct Weights {
     pub vocab: LlamaVocab,
     #[cfg(feature = "cuda")]
     pub gpu: Option<std::sync::Arc<crate::runtime::cuda::CudaWeights>>,
+    #[cfg(feature = "cuda")]
+    pub gpu_graph: Option<std::sync::Arc<std::sync::Mutex<GpuWorkspace>>>,
 }
 
 impl Weights {
@@ -98,6 +102,13 @@ impl Weights {
     #[cfg(feature = "cuda")]
     pub fn gpu(&self) -> Option<&crate::runtime::cuda::CudaWeights> {
         self.gpu.as_deref()
+    }
+
+    #[cfg(feature = "cuda")]
+    pub fn gpu_graph_lock(&self) -> Option<std::sync::MutexGuard<'_, GpuWorkspace>> {
+        self.gpu_graph
+            .as_ref()
+            .map(|g| g.lock().unwrap_or_else(|e| e.into_inner()))
     }
 }
 
@@ -116,10 +127,19 @@ pub struct LinearLayer {
     pub ssm: Vec<f32>,
 }
 
+/// Sampler settings used by `generate::next_token` on the CPU path.
+pub struct Sampling {
+    pub temp: f32,
+    pub top_p: f32,
+    pub rng: Mt19937,
+}
+
 pub struct ModelState {
     pub pos: usize,
     pub full: Vec<FullAttnLayer>,
     pub linear: Vec<LinearLayer>,
+    /// `None` selects greedy sampling; set after prefill for top-p.
+    pub sampling: Option<Sampling>,
 }
 
 impl ModelState {
@@ -142,6 +162,7 @@ impl ModelState {
                     ssm: vec![0.0; p.ssm_dt_rank * p.ssm_state * p.ssm_state],
                 })
                 .collect(),
+            sampling: None,
         }
     }
 }

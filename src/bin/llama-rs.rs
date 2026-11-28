@@ -14,7 +14,7 @@ Options:
   -n, --n-predict <n>   Max tokens to generate (default: 64)
   --temp <f32>          Sampling temperature; 0 means greedy (default: 0)
   --top-p <f32>         Nucleus sampling mass (default: 0.9)
-  --gpu                 Use CUDA GPU weights (needs cuda feature)
+  --gpu                 Use CUDA GPU weights (needs cuda feature; requires --temp 0)
   --help                Print this help";
 
 fn main() {
@@ -75,6 +75,7 @@ fn run() -> std::result::Result<(), String> {
     {
         if let Some(g) = weights.gpu() {
             println!("{}", g.info());
+            println!("GPU graph: all layers on device (greedy sampling)");
         }
     }
     let output = generate(&weights, &prompt, n_predict, temp, top_p).map_err(|e| e.to_string())?;

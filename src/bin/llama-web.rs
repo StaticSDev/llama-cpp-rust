@@ -13,7 +13,7 @@ Options:
   --model <path>     GGUF model file (required)
   --host <addr>      Listen address (default: 127.0.0.1)
   --port <u16>       Listen port (default: 8080)
-  --gpu              Use CUDA GPU weights (needs cuda feature)
+  --gpu              Use CUDA GPU weights (needs cuda feature; requires --temp 0)
   --help             Print this help";
 
 fn main() {
@@ -64,6 +64,7 @@ fn run() -> std::result::Result<(), String> {
     {
         if !gpu.is_empty() {
             println!("{gpu}");
+            println!("GPU graph: all layers on device (greedy sampling)");
         }
     }
     let listener =

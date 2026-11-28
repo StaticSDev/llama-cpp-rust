@@ -4,7 +4,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::core::{Error, Mt19937, Result, Token};
 use crate::runtime::qwen35;
-use crate::runtime::types::{ModelState, Weights};
+use crate::runtime::types::{ModelState, Sampling, Weights};
 
 fn forward_logits(w: &Weights, st: &mut ModelState, tok: Token) -> Result<Vec<f32>> {
     let logits = qwen35::forward(w, st, tok)?;
@@ -12,6 +12,23 @@ fn forward_logits(w: &Weights, st: &mut ModelState, tok: Token) -> Result<Vec<f3
         return Err(Error::new("forward produced no logits"));
     }
     Ok(logits)
+}
+
+/// Advance the model by `token` and return the candidate for the next step.
+///
+/// The GPU graph returns greedy tokens; the CPU path samples from logits.
+pub fn next_token(w: &Weights, st: &mut ModelState, token: i32) -> Result<Token> {
+    #[cfg(feature = "cuda")]
+    if let Some(mut graph) = w.gpu_graph_lock() {
+        let next = graph.forward_token(w, token, st.pos)?;
+        st.pos += 1;
+        return Ok(next);
+    }
+    let logits = forward_logits(w, st, token)?;
+    Ok(match st.sampling.as_mut() {
+        Some(s) => sample_top_p(&logits, s.temp, s.top_p, &mut s.rng),
+        None => greedy(&logits),
+    })
 }
 
 /// Counters collected during one generation run.
@@ -69,19 +86,27 @@ pub fn generate_stream<F: FnMut(Event)>(
     top_p: f32,
     mut on_event: F,
 ) -> Result<(String, Stats)> {
+    #[cfg(feature = "cuda")]
+    if temp > 0.0 && w.gpu_graph_lock().is_some() {
+        return Err(Error::new(
+            "top-p sampling on GPU is not ported yet; use --temp 0",
+        ));
+    }
+
     let formatted = format!("<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n");
     let prompt_tokens = w.vocab.tokenize(&formatted, true, true);
     let mut st = ModelState::new(w);
     let mut stats = Stats::default();
 
     let prompt_start = Instant::now();
-    let mut logits = if prompt_tokens.is_empty() {
-        forward_logits(w, &mut st, w.vocab.token_bos())?
+    // Sampling stays off during prefill: it must not consume RNG draws.
+    let mut candidate = if prompt_tokens.is_empty() {
+        next_token(w, &mut st, w.vocab.token_bos())?
     } else {
         let total = prompt_tokens.len();
-        let mut last = Vec::new();
+        let mut last = 0;
         for (i, &tok) in prompt_tokens.iter().enumerate() {
-            last = forward_logits(w, &mut st, tok)?;
+            last = next_token(w, &mut st, tok)?;
             on_event(Event::Prompt { done: i + 1, total });
         }
         last
@@ -93,18 +118,17 @@ pub fn generate_stream<F: FnMut(Event)>(
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos() as u32;
-    let mut rng = Mt19937::new(seed);
+    let rng = Mt19937::new(seed);
+    if temp > 0.0 {
+        st.sampling = Some(Sampling { temp, top_p, rng });
+    }
     let eos = w.vocab.token_eos();
     let eot = w.vocab.token_eot();
     let mut out = String::new();
     let gen_start = Instant::now();
 
     for _ in 0..n_predict {
-        let tok = if temp <= 0.0 {
-            greedy(&logits)
-        } else {
-            sample_top_p(&logits, temp, top_p, &mut rng)
-        };
+        let tok = candidate;
 
         if tok == eos || tok == eot {
             break;
@@ -122,7 +146,7 @@ pub fn generate_stream<F: FnMut(Event)>(
 
         stats.tokens += 1;
         stats.gen_ms = gen_start.elapsed().as_millis();
-        logits = forward_logits(w, &mut st, tok)?;
+        candidate = next_token(w, &mut st, tok)?;
     }
 
     stats.gen_ms = gen_start.elapsed().as_millis();
