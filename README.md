@@ -66,6 +66,8 @@ API:
 | --- | --- |
 | `GET /api/status` | Model path, ready flag, GPU name |
 | `POST /api/chat/stream` | NDJSON events: `prompt`, `token`, `done`, `error` |
+| `POST /v1/chat/completions` | OpenAI-compatible response with `timings` |
+| `GET /v1/models` | Model list for OpenAI clients |
 
 ---
 
@@ -82,17 +84,23 @@ threads, 15 GiB RAM. **Model:** Qwen3.5-4B-Q4_K_M.gguf.
 | Cold prefill, 203 / 202 tokens | 154.98 tok/s | 6.51 tok/s | 0.04× |
 | Generation, 6 tokens | 46.14 tok/s | 6.53 tok/s | 0.14× |
 | Generation, 200 tokens, partial CUDA | 54.57 tok/s | 6.34 tok/s | 0.12× |
-| Generation, 32 tokens, full GPU graph | — | 8.88 tok/s | — |
+| Prefill, 78 tokens, 8-token batches | — | ~76 tok/s | 0.49× |
+| Generation, 32 tokens, tuned GPU graph | — | ~26 tok/s | 0.48× |
 
 Upstream flags: `-ngl 99 -c 32768 -t 6 -tb 12 -b 2048 -ub 512 -np 1 -fa on
 -ctk q4_0 -ctv q4_0 --context-shift --jinja`. Prompt cache reuse was disabled
 for the cold-prefill number.
 
-The short six-token run is noisy; the 200-token run is the stable reference.
-The port is still roughly 6× slower than upstream. The full graph is on the
-GPU, but every operation launches its own kernel and synchronizes before the
-next one; there is no fusion, CUDA graphs or vectorized dequant. Upstream
-reaches the memory bandwidth limit of this card; this port does not.
+The short six-token run is noisy; the 200-token upstream run is the stable
+reference. The current GPU path is about twice as slow as upstream. It uses
+warp-per-row vectorized dequant, grouped matvecs, 16-token batched prefill with
+weight reuse, fused GDN/residual/norm kernels, and one stream sync per token.
+Upstream still wins with fused MMQ kernels and better memory throughput.
+
+Parity `bench/parity_check.py` compares greedy outputs on 8 prompts: 7 match,
+one code-style prompt still diverges in the thinking block because of different
+f32 reduction order. Raw data: [bench/latency.json](bench/latency.json) and
+other `bench/latency_*.json` files.
 
 Reproduce:
 
@@ -122,8 +130,8 @@ models/        local GGUF files, gitignored
 ## Tests
 
 ```sh
-cargo test                 # 250 passed
-cargo test --features cuda # 250 passed
+cargo test                 # 288 passed
+cargo test --features cuda # 288 passed
 ```
 
 Zero warnings in both configurations.
