@@ -657,7 +657,7 @@ impl GpuWorkspace {
         let kv_stride = d.n_kv * d.hd;
         let qkv_out_stride = d.channels.max(2 * d.n_head * d.hd);
 
-        for chunk in tokens.chunks(PREFILL_CHUNK) {
+        for (chunk_index, chunk) in tokens.chunks(PREFILL_CHUNK).enumerate() {
             let nt = chunk.len();
             let nt_i32 = to_i32(nt, "prefill chunk")?;
 
@@ -737,7 +737,10 @@ impl GpuWorkspace {
                 // Conv history, GDN state and KV cache depend on the previous
                 // token, so these fused ops keep the per-token order.
                 for t in 0..nt {
-                    let pos = to_i32(start_pos + t, "prefill position")?;
+                    let pos = to_i32(
+                        start_pos + chunk_index * PREFILL_CHUNK + t,
+                        "prefill position",
+                    )?;
                     let norm_i = self.batch_norm.wrapping_add(t * e);
                     if self.p.is_recurrent(il) {
                         let r = layer
