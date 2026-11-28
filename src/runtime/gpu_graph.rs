@@ -327,7 +327,6 @@ impl GpuWorkspace {
             };
             layers.push(LayerIdx { common, rec, full });
         }
-        drop(resolve);
 
         let p = w.params.clone();
         let n_rot = to_i32(p.rope_dim.min(p.head_dim), "rope_dim")?;
