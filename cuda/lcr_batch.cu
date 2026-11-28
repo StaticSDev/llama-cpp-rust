@@ -84,22 +84,34 @@ __device__ __forceinline__ void batch_get_scale_min_k4(int j, const uint8_t *q,
     }
 }
 
-// One warp per (output row, token) pair; a CTA of 256 threads covers eight
-// pairs. Mirrors the matvec kernels in lcr_kernels.cu: each warp walks whole
-// quant blocks, reads group scales once per subgroup, and reduces with shuffles
-// only. All loops are type-specialized; no switch remains per element.
-__device__ __forceinline__ void batch_mv_reduce(float sum, float *out) {
+// One warp owns one output row; a CTA of 256 threads covers eight rows. The
+// warp walks its row once, dequantizes each weight value once, and FMA-s that
+// value into up to BATCH_NT per-token accumulators. Tokens beyond eight are
+// handled in groups of eight; predicates skip unused accumulators. No shared
+// memory and no barrier: only __ldg and warp shuffles, in type-specialized
+// loops with no switch per element.
+#define BATCH_NT 8
+
+// Warp-reduce one sum per token and write out[t0+t][row]. Only lane 0 stores;
+// predicates skip tokens past n_tokens.
+template<bool FULL>
+__device__ __forceinline__ void batch_mv_reduce8(float *sum, float *out,
+                                                  int row, int out_stride,
+                                                  int t0, int n_tokens) {
     for (int s = 16; s > 0; s >>= 1) {
-        sum += __shfl_down_sync(0xFFFFFFFFu, sum, s);
+#pragma unroll
+        for (int t = 0; t < BATCH_NT; ++t) {
+            sum[t] += __shfl_down_sync(0xFFFFFFFFu, sum[t], s);
+        }
     }
     if ((threadIdx.x & 31) == 0) {
-        *out = sum;
+#pragma unroll
+        for (int t = 0; t < BATCH_NT; ++t) {
+            if (FULL || t0 + t < n_tokens) {
+                out[(size_t)(t0 + t) * out_stride + row] = sum[t];
+            }
+        }
     }
-}
-
-__device__ __forceinline__ bool batch_vec_ok(const void *w, const void *x, int align) {
-    return ((uintptr_t)w & (align - 1)) == 0 &&
-           ((uintptr_t)x & (align - 1)) == 0;
 }
 
 static int batch_row_bytes(int type, int64_t in, size_t *out) {
@@ -135,382 +147,517 @@ struct BatchContext {
     int count;
 };
 
+template<bool FULL, bool VX>
 __global__ void lcr_batch_matmul_f32(const uint8_t * __restrict__ blob, int in,
-                                     const float * __restrict__ x,
-                                     float * __restrict__ out, int64_t offset,
-                                     size_t row_bytes, int out_rows,
-                                     int x_stride, int out_stride) {
+                                      const float * __restrict__ x,
+                                      float * __restrict__ out, int64_t offset,
+                                      size_t row_bytes, int out_rows,
+                                      int x_stride, int out_stride,
+                                      int n_tokens) {
     const int lane = threadIdx.x & 31;
     const int wid = threadIdx.x >> 5;
     const int row = blockIdx.x * (BATCH_BLOCK_SIZE / 32) + wid;
-    const int tok = blockIdx.y;
     if (row >= out_rows) return;
     const float * __restrict__ w =
         (const float *)(blob + offset + (size_t)row * row_bytes);
-    const float * __restrict__ xr = x + (size_t)tok * x_stride;
-    float sum = 0.0f;
-    if (((in & 3) == 0) && batch_vec_ok(w, xr, 16)) {
-        for (int n = lane * 4; n + 4 <= in; n += 32 * 4) {
-            const float4 wv = __ldg((const float4 *)(w + n));
-            const float4 xv = __ldg((const float4 *)(xr + n));
-            sum += (wv.x * xv.x + wv.y * xv.y) + (wv.z * xv.z + wv.w * xv.w);
+    float sum[BATCH_NT];
+    for (int t0 = 0; t0 < n_tokens; t0 += BATCH_NT) {
+#pragma unroll
+        for (int t = 0; t < BATCH_NT; ++t) sum[t] = 0.0f;
+        if (VX) {
+            for (int n = lane * 4; n + 4 <= in; n += 32 * 4) {
+                const float4 wv = __ldg((const float4 *)(w + n));
+#pragma unroll
+                for (int t = 0; t < BATCH_NT; ++t) {
+                    if (FULL || t0 + t < n_tokens) {
+                        const float4 xv = __ldg((const float4 *)
+                            (x + (size_t)(t0 + t) * x_stride + n));
+                        sum[t] += (wv.x * xv.x + wv.y * xv.y) +
+                                  (wv.z * xv.z + wv.w * xv.w);
+                    }
+                }
+            }
+        } else {
+            for (int n = lane; n < in; n += 32) {
+                const float wv = __ldg(w + n);
+#pragma unroll
+                for (int t = 0; t < BATCH_NT; ++t) {
+                    if (FULL || t0 + t < n_tokens) {
+                        sum[t] += wv * __ldg(x + (size_t)(t0 + t) * x_stride + n);
+                    }
+                }
+            }
         }
-    } else {
-        for (int n = lane; n < in; n += 32) {
-            sum += __ldg(w + n) * __ldg(xr + n);
-        }
+        batch_mv_reduce8<FULL>(sum, out, row, out_stride, t0, n_tokens);
     }
-    batch_mv_reduce(sum, out + (size_t)tok * out_stride + row);
 }
 
+template<bool FULL, bool VX>
 __global__ void lcr_batch_matmul_f16(const uint8_t * __restrict__ blob, int in,
-                                     const float * __restrict__ x,
-                                     float * __restrict__ out, int64_t offset,
-                                     size_t row_bytes, int out_rows,
-                                     int x_stride, int out_stride) {
+                                      const float * __restrict__ x,
+                                      float * __restrict__ out, int64_t offset,
+                                      size_t row_bytes, int out_rows,
+                                      int x_stride, int out_stride,
+                                      int n_tokens) {
     const int lane = threadIdx.x & 31;
     const int wid = threadIdx.x >> 5;
     const int row = blockIdx.x * (BATCH_BLOCK_SIZE / 32) + wid;
-    const int tok = blockIdx.y;
     if (row >= out_rows) return;
     const uint16_t * __restrict__ w =
         (const uint16_t *)(blob + offset + (size_t)row * row_bytes);
-    const float * __restrict__ xr = x + (size_t)tok * x_stride;
-    float sum = 0.0f;
-    if (((in & 3) == 0) && batch_vec_ok(w, xr, 8)) {
-        for (int n = lane * 4; n + 4 <= in; n += 32 * 4) {
-            const uint2 wv = __ldg((const uint2 *)(w + n));
-            const float4 xv = __ldg((const float4 *)(xr + n));
-            sum += batch_half2float((uint16_t)wv.x) * xv.x;
-            sum += batch_half2float((uint16_t)(wv.x >> 16)) * xv.y;
-            sum += batch_half2float((uint16_t)wv.y) * xv.z;
-            sum += batch_half2float((uint16_t)(wv.y >> 16)) * xv.w;
+    float sum[BATCH_NT];
+    for (int t0 = 0; t0 < n_tokens; t0 += BATCH_NT) {
+#pragma unroll
+        for (int t = 0; t < BATCH_NT; ++t) sum[t] = 0.0f;
+        if (VX) {
+            for (int n = lane * 4; n + 4 <= in; n += 32 * 4) {
+                const uint2 wv = __ldg((const uint2 *)(w + n));
+                const float wq[4] = {
+                    batch_half2float((uint16_t)wv.x),
+                    batch_half2float((uint16_t)(wv.x >> 16)),
+                    batch_half2float((uint16_t)wv.y),
+                    batch_half2float((uint16_t)(wv.y >> 16))
+                };
+#pragma unroll
+                for (int t = 0; t < BATCH_NT; ++t) {
+                    if (FULL || t0 + t < n_tokens) {
+                        const float4 xv = __ldg((const float4 *)
+                            (x + (size_t)(t0 + t) * x_stride + n));
+                        sum[t] += (wq[0] * xv.x + wq[1] * xv.y) +
+                                  (wq[2] * xv.z + wq[3] * xv.w);
+                    }
+                }
+            }
+        } else {
+            for (int n = lane; n < in; n += 32) {
+                const float wq = batch_half2float(__ldg(w + n));
+#pragma unroll
+                for (int t = 0; t < BATCH_NT; ++t) {
+                    if (FULL || t0 + t < n_tokens) {
+                        sum[t] += wq * __ldg(x + (size_t)(t0 + t) * x_stride + n);
+                    }
+                }
+            }
         }
-    } else {
-        for (int n = lane; n < in; n += 32) {
-            sum += batch_half2float(__ldg(w + n)) * __ldg(xr + n);
-        }
+        batch_mv_reduce8<FULL>(sum, out, row, out_stride, t0, n_tokens);
     }
-    batch_mv_reduce(sum, out + (size_t)tok * out_stride + row);
 }
 
+template<bool FULL, bool VX>
 __global__ void lcr_batch_matmul_bf16(const uint8_t * __restrict__ blob, int in,
-                                      const float * __restrict__ x,
-                                      float * __restrict__ out, int64_t offset,
-                                      size_t row_bytes, int out_rows,
-                                      int x_stride, int out_stride) {
+                                       const float * __restrict__ x,
+                                       float * __restrict__ out, int64_t offset,
+                                       size_t row_bytes, int out_rows,
+                                       int x_stride, int out_stride,
+                                       int n_tokens) {
     const int lane = threadIdx.x & 31;
     const int wid = threadIdx.x >> 5;
     const int row = blockIdx.x * (BATCH_BLOCK_SIZE / 32) + wid;
-    const int tok = blockIdx.y;
     if (row >= out_rows) return;
     const uint16_t * __restrict__ w =
         (const uint16_t *)(blob + offset + (size_t)row * row_bytes);
-    const float * __restrict__ xr = x + (size_t)tok * x_stride;
-    float sum = 0.0f;
-    if (((in & 3) == 0) && batch_vec_ok(w, xr, 8)) {
-        for (int n = lane * 4; n + 4 <= in; n += 32 * 4) {
-            const uint2 wv = __ldg((const uint2 *)(w + n));
-            const float4 xv = __ldg((const float4 *)(xr + n));
-            sum += batch_bf162float((uint16_t)wv.x) * xv.x;
-            sum += batch_bf162float((uint16_t)(wv.x >> 16)) * xv.y;
-            sum += batch_bf162float((uint16_t)wv.y) * xv.z;
-            sum += batch_bf162float((uint16_t)(wv.y >> 16)) * xv.w;
+    float sum[BATCH_NT];
+    for (int t0 = 0; t0 < n_tokens; t0 += BATCH_NT) {
+#pragma unroll
+        for (int t = 0; t < BATCH_NT; ++t) sum[t] = 0.0f;
+        if (VX) {
+            for (int n = lane * 4; n + 4 <= in; n += 32 * 4) {
+                const uint2 wv = __ldg((const uint2 *)(w + n));
+                const float wq[4] = {
+                    batch_bf162float((uint16_t)wv.x),
+                    batch_bf162float((uint16_t)(wv.x >> 16)),
+                    batch_bf162float((uint16_t)wv.y),
+                    batch_bf162float((uint16_t)(wv.y >> 16))
+                };
+#pragma unroll
+                for (int t = 0; t < BATCH_NT; ++t) {
+                    if (FULL || t0 + t < n_tokens) {
+                        const float4 xv = __ldg((const float4 *)
+                            (x + (size_t)(t0 + t) * x_stride + n));
+                        sum[t] += (wq[0] * xv.x + wq[1] * xv.y) +
+                                  (wq[2] * xv.z + wq[3] * xv.w);
+                    }
+                }
+            }
+        } else {
+            for (int n = lane; n < in; n += 32) {
+                const float wq = batch_bf162float(__ldg(w + n));
+#pragma unroll
+                for (int t = 0; t < BATCH_NT; ++t) {
+                    if (FULL || t0 + t < n_tokens) {
+                        sum[t] += wq * __ldg(x + (size_t)(t0 + t) * x_stride + n);
+                    }
+                }
+            }
         }
-    } else {
-        for (int n = lane; n < in; n += 32) {
-            sum += batch_bf162float(__ldg(w + n)) * __ldg(xr + n);
-        }
+        batch_mv_reduce8<FULL>(sum, out, row, out_stride, t0, n_tokens);
     }
-    batch_mv_reduce(sum, out + (size_t)tok * out_stride + row);
 }
 
+template<bool FULL, bool VX>
 __global__ void lcr_batch_matmul_q8_0(const uint8_t * __restrict__ blob, int in,
-                                      const float * __restrict__ x,
-                                      float * __restrict__ out, int64_t offset,
-                                      size_t row_bytes, int out_rows,
-                                      int x_stride, int out_stride) {
+                                       const float * __restrict__ x,
+                                       float * __restrict__ out, int64_t offset,
+                                       size_t row_bytes, int out_rows,
+                                       int x_stride, int out_stride,
+                                       int n_tokens) {
     const int lane = threadIdx.x & 31;
     const int wid = threadIdx.x >> 5;
     const int row = blockIdx.x * (BATCH_BLOCK_SIZE / 32) + wid;
-    const int tok = blockIdx.y;
     if (row >= out_rows) return;
     const uint8_t * __restrict__ w = blob + offset + (size_t)row * row_bytes;
-    const float * __restrict__ xr = x + (size_t)tok * x_stride;
     const int blocks = in >> 5;
-    float sum = 0.0f;
-    for (int b = 0; b < blocks; ++b) {
-        const BatchBlockQ8_0 *blk =
-            (const BatchBlockQ8_0 *)(w + (size_t)b * sizeof(BatchBlockQ8_0));
-        float d = 0.0f;
-        if (lane == 0) {
-            d = batch_half2float(__ldg(&blk->d));
+    float sum[BATCH_NT];
+    for (int t0 = 0; t0 < n_tokens; t0 += BATCH_NT) {
+#pragma unroll
+        for (int t = 0; t < BATCH_NT; ++t) sum[t] = 0.0f;
+        for (int b = 0; b < blocks; ++b) {
+            const BatchBlockQ8_0 *blk =
+                (const BatchBlockQ8_0 *)(w + (size_t)b * sizeof(BatchBlockQ8_0));
+            float d = 0.0f;
+            if (lane == 0) {
+                d = batch_half2float(__ldg(&blk->d));
+            }
+            d = __shfl_sync(0xFFFFFFFFu, d, 0);
+            const int q = (int)__ldg(&blk->qs[lane]);
+            const float wq = (float)q * d;
+#pragma unroll
+            for (int t = 0; t < BATCH_NT; ++t) {
+                if (FULL || t0 + t < n_tokens) {
+                    sum[t] += wq * __ldg(x + (size_t)(t0 + t) * x_stride +
+                                         (size_t)b * 32 + lane);
+                }
+            }
         }
-        d = __shfl_sync(0xFFFFFFFFu, d, 0);
-        const int q = (int)__ldg(&blk->qs[lane]);
-        sum += ((float)q * d) * __ldg(xr + (size_t)b * 32 + lane);
+        batch_mv_reduce8<FULL>(sum, out, row, out_stride, t0, n_tokens);
     }
-    batch_mv_reduce(sum, out + (size_t)tok * out_stride + row);
 }
 
-// Each lane walks the eight 32-element subgroups of every 256-element block,
-// so each packed byte is read once and a scale/min pair is computed once per
-// subgroup. Scales broadcast within each 8-lane subgroup via shuffles.
+// One warp owns one output row. Each lane walks the eight 32-element subgroups
+// of every 256-element block; the packed byte and its scale/min pair are read
+// once and reused for every token in the group. Scales broadcast within each
+// 8-lane subgroup via shuffles.
+template<bool FULL, bool VX>
 __global__ void lcr_batch_matmul_q4_k(const uint8_t * __restrict__ blob, int in,
-                                      const float * __restrict__ x,
-                                      float * __restrict__ out, int64_t offset,
-                                      size_t row_bytes, int out_rows,
-                                      int x_stride, int out_stride) {
+                                       const float * __restrict__ x,
+                                       float * __restrict__ out, int64_t offset,
+                                       size_t row_bytes, int out_rows,
+                                       int x_stride, int out_stride,
+                                       int n_tokens) {
     const int lane = threadIdx.x & 31;
     const int wid = threadIdx.x >> 5;
     const int row = blockIdx.x * (BATCH_BLOCK_SIZE / 32) + wid;
-    const int tok = blockIdx.y;
     if (row >= out_rows) return;
     const uint8_t * __restrict__ w = blob + offset + (size_t)row * row_bytes;
-    const float * __restrict__ xr = x + (size_t)tok * x_stride;
     const int blocks = in >> 8;
-    const bool vx = (((uintptr_t)xr) & 15) == 0;
-    float sum = 0.0f;
-    for (int b = 0; b < blocks; ++b) {
-        const BatchBlockQ4_K *blk =
-            (const BatchBlockQ4_K *)(w + (size_t)b * sizeof(BatchBlockQ4_K));
-        const uint32_t md = __ldg((const uint32_t *)&blk->dm);
-        const float dall = batch_half2float((uint16_t)md);
-        const float dmin = batch_half2float((uint16_t)(md >> 16));
-        float acc = 0.0f;
-        if (vx) {
-            const int gbase = lane >> 3;
+    float sum[BATCH_NT];
+    for (int t0 = 0; t0 < n_tokens; t0 += BATCH_NT) {
 #pragma unroll
-            for (int t = 0; t < 2; ++t) {
-                const int g = gbase + t * 4;
-                float d = 0.0f, dm = 0.0f;
-                if ((lane & 7) == 0) {
-                    uint8_t sc, m;
-                    batch_get_scale_min_k4(g, blk->scales, sc, m);
-                    d = dall * (float)sc;
-                    dm = dmin * (float)m;
-                }
-                d = __shfl_sync(0xFFFFFFFFu, d, 0, 8);
-                dm = __shfl_sync(0xFFFFFFFFu, dm, 0, 8);
-                const uint32_t q = __ldg((const uint32_t *)
-                    (blk->qs + 32 * (g >> 1) + 4 * (lane & 7)));
-                const float4 xv = __ldg((const float4 *)
-                    (xr + (size_t)b * BATCH_QK_K + g * 32 + 4 * (lane & 7)));
-                if (g & 1) {
-                    acc += (d * (float)((q >> 4) & 15) - dm) * xv.x;
-                    acc += (d * (float)((q >> 12) & 15) - dm) * xv.y;
-                    acc += (d * (float)((q >> 20) & 15) - dm) * xv.z;
-                    acc += (d * (float)((q >> 28) & 15) - dm) * xv.w;
-                } else {
-                    acc += (d * (float)(q & 15) - dm) * xv.x;
-                    acc += (d * (float)((q >> 8) & 15) - dm) * xv.y;
-                    acc += (d * (float)((q >> 16) & 15) - dm) * xv.z;
-                    acc += (d * (float)((q >> 24) & 15) - dm) * xv.w;
-                }
-            }
-        } else {
+        for (int t = 0; t < BATCH_NT; ++t) sum[t] = 0.0f;
+        for (int b = 0; b < blocks; ++b) {
+            const BatchBlockQ4_K *blk =
+                (const BatchBlockQ4_K *)(w + (size_t)b * sizeof(BatchBlockQ4_K));
+            const uint32_t md = __ldg((const uint32_t *)&blk->dm);
+            const float dall = batch_half2float((uint16_t)md);
+            const float dmin = batch_half2float((uint16_t)(md >> 16));
+            if (VX) {
+                const int gbase = lane >> 3;
 #pragma unroll
-            for (int s = 0; s < 8; ++s) {
-                float d = 0.0f, dm = 0.0f;
-                if (lane == 0) {
-                    uint8_t sc, m;
-                    batch_get_scale_min_k4(s, blk->scales, sc, m);
-                    d = dall * (float)sc;
-                    dm = dmin * (float)m;
+                for (int t2 = 0; t2 < 2; ++t2) {
+                    const int g = gbase + t2 * 4;
+                    float d = 0.0f, dm = 0.0f;
+                    if ((lane & 7) == 0) {
+                        uint8_t sc, m;
+                        batch_get_scale_min_k4(g, blk->scales, sc, m);
+                        d = dall * (float)sc;
+                        dm = dmin * (float)m;
+                    }
+                    d = __shfl_sync(0xFFFFFFFFu, d, 0, 8);
+                    dm = __shfl_sync(0xFFFFFFFFu, dm, 0, 8);
+                    const uint32_t q = __ldg((const uint32_t *)
+                        (blk->qs + 32 * (g >> 1) + 4 * (lane & 7)));
+                    float wq[4];
+                    if (g & 1) {
+                        wq[0] = d * (float)((q >> 4) & 15) - dm;
+                        wq[1] = d * (float)((q >> 12) & 15) - dm;
+                        wq[2] = d * (float)((q >> 20) & 15) - dm;
+                        wq[3] = d * (float)((q >> 28) & 15) - dm;
+                    } else {
+                        wq[0] = d * (float)(q & 15) - dm;
+                        wq[1] = d * (float)((q >> 8) & 15) - dm;
+                        wq[2] = d * (float)((q >> 16) & 15) - dm;
+                        wq[3] = d * (float)((q >> 24) & 15) - dm;
+                    }
+#pragma unroll
+                    for (int t = 0; t < BATCH_NT; ++t) {
+                        if (FULL || t0 + t < n_tokens) {
+                            const float4 xv = __ldg((const float4 *)
+                                (x + (size_t)(t0 + t) * x_stride +
+                                 (size_t)b * BATCH_QK_K + g * 32 + 4 * (lane & 7)));
+                            sum[t] += (wq[0] * xv.x + wq[1] * xv.y) +
+                                      (wq[2] * xv.z + wq[3] * xv.w);
+                        }
+                    }
                 }
-                d = __shfl_sync(0xFFFFFFFFu, d, 0);
-                dm = __shfl_sync(0xFFFFFFFFu, dm, 0);
-                const uint8_t q = __ldg(&blk->qs[32 * (s >> 1) + lane]);
-                const float vq = (s & 1) ? (float)(q >> 4) : (float)(q & 0xF);
-                acc += (d * vq - dm) *
-                       __ldg(xr + (size_t)b * BATCH_QK_K + s * 32 + lane);
+            } else {
+#pragma unroll
+                for (int s = 0; s < 8; ++s) {
+                    float d = 0.0f, dm = 0.0f;
+                    if (lane == 0) {
+                        uint8_t sc, m;
+                        batch_get_scale_min_k4(s, blk->scales, sc, m);
+                        d = dall * (float)sc;
+                        dm = dmin * (float)m;
+                    }
+                    d = __shfl_sync(0xFFFFFFFFu, d, 0);
+                    dm = __shfl_sync(0xFFFFFFFFu, dm, 0);
+                    const uint8_t q = __ldg(&blk->qs[32 * (s >> 1) + lane]);
+                    const float vq = (s & 1) ? (float)(q >> 4) : (float)(q & 0xF);
+                    const float wq = d * vq - dm;
+#pragma unroll
+                    for (int t = 0; t < BATCH_NT; ++t) {
+                        if (FULL || t0 + t < n_tokens) {
+                            sum[t] += wq * __ldg(x + (size_t)(t0 + t) * x_stride +
+                                (size_t)b * BATCH_QK_K + s * 32 + lane);
+                        }
+                    }
+                }
             }
         }
-        sum += acc;
+        batch_mv_reduce8<FULL>(sum, out, row, out_stride, t0, n_tokens);
     }
-    batch_mv_reduce(sum, out + (size_t)tok * out_stride + row);
 }
 
+template<bool FULL, bool VX>
 __global__ void lcr_batch_matmul_q5_k(const uint8_t * __restrict__ blob, int in,
-                                      const float * __restrict__ x,
-                                      float * __restrict__ out, int64_t offset,
-                                      size_t row_bytes, int out_rows,
-                                      int x_stride, int out_stride) {
+                                       const float * __restrict__ x,
+                                       float * __restrict__ out, int64_t offset,
+                                       size_t row_bytes, int out_rows,
+                                       int x_stride, int out_stride,
+                                       int n_tokens) {
     const int lane = threadIdx.x & 31;
     const int wid = threadIdx.x >> 5;
     const int row = blockIdx.x * (BATCH_BLOCK_SIZE / 32) + wid;
-    const int tok = blockIdx.y;
     if (row >= out_rows) return;
     const uint8_t * __restrict__ w = blob + offset + (size_t)row * row_bytes;
-    const float * __restrict__ xr = x + (size_t)tok * x_stride;
     const int blocks = in >> 8;
-    const bool vx = (((uintptr_t)xr) & 15) == 0;
-    float sum = 0.0f;
-    for (int b = 0; b < blocks; ++b) {
-        const BatchBlockQ5_K *blk =
-            (const BatchBlockQ5_K *)(w + (size_t)b * sizeof(BatchBlockQ5_K));
-        const uint32_t md = __ldg((const uint32_t *)&blk->dm);
-        const float dall = batch_half2float((uint16_t)md);
-        const float dmin = batch_half2float((uint16_t)(md >> 16));
-        float acc = 0.0f;
-        if (vx) {
-            const int gbase = lane >> 3;
+    float sum[BATCH_NT];
+    for (int t0 = 0; t0 < n_tokens; t0 += BATCH_NT) {
 #pragma unroll
-            for (int t = 0; t < 2; ++t) {
-                const int g = gbase + t * 4;
-                float d = 0.0f, dm = 0.0f;
-                if ((lane & 7) == 0) {
-                    uint8_t sc, m;
-                    batch_get_scale_min_k4(g, blk->scales, sc, m);
-                    d = dall * (float)sc;
-                    dm = dmin * (float)m;
-                }
-                d = __shfl_sync(0xFFFFFFFFu, d, 0, 8);
-                dm = __shfl_sync(0xFFFFFFFFu, dm, 0, 8);
-                const uint32_t ql = __ldg((const uint32_t *)
-                    (blk->qs + 32 * (g >> 1) + 4 * (lane & 7)));
-                const uint32_t qh = __ldg((const uint32_t *)
-                    (blk->qh + 4 * (lane & 7)));
-                const float4 xv = __ldg((const float4 *)
-                    (xr + (size_t)b * BATCH_QK_K + g * 32 + 4 * (lane & 7)));
-                const uint32_t qhmask = 1u << g;
+        for (int t = 0; t < BATCH_NT; ++t) sum[t] = 0.0f;
+        for (int b = 0; b < blocks; ++b) {
+            const BatchBlockQ5_K *blk =
+                (const BatchBlockQ5_K *)(w + (size_t)b * sizeof(BatchBlockQ5_K));
+            const uint32_t md = __ldg((const uint32_t *)&blk->dm);
+            const float dall = batch_half2float((uint16_t)md);
+            const float dmin = batch_half2float((uint16_t)(md >> 16));
+            if (VX) {
+                const int gbase = lane >> 3;
 #pragma unroll
-                for (int i = 0; i < 4; ++i) {
-                    const uint32_t shift = 8 * i;
-                    const uint32_t l4 = (g & 1) ? ((ql >> (shift + 4)) & 15)
-                                                : ((ql >> shift) & 15);
-                    const int q = (int)l4 | (((qh >> shift) & qhmask) ? 16 : 0);
-                    acc += (d * (float)q - dm) *
-                           (i == 0 ? xv.x : i == 1 ? xv.y : i == 2 ? xv.z : xv.w);
-                }
-            }
-        } else {
+                for (int t2 = 0; t2 < 2; ++t2) {
+                    const int g = gbase + t2 * 4;
+                    float d = 0.0f, dm = 0.0f;
+                    if ((lane & 7) == 0) {
+                        uint8_t sc, m;
+                        batch_get_scale_min_k4(g, blk->scales, sc, m);
+                        d = dall * (float)sc;
+                        dm = dmin * (float)m;
+                    }
+                    d = __shfl_sync(0xFFFFFFFFu, d, 0, 8);
+                    dm = __shfl_sync(0xFFFFFFFFu, dm, 0, 8);
+                    const uint32_t ql = __ldg((const uint32_t *)
+                        (blk->qs + 32 * (g >> 1) + 4 * (lane & 7)));
+                    const uint32_t qh = __ldg((const uint32_t *)
+                        (blk->qh + 4 * (lane & 7)));
+                    const uint32_t qhmask = 1u << g;
+                    float wq[4];
 #pragma unroll
-            for (int s = 0; s < 8; ++s) {
-                float d = 0.0f, dm = 0.0f;
-                if (lane == 0) {
-                    uint8_t sc, m;
-                    batch_get_scale_min_k4(s, blk->scales, sc, m);
-                    d = dall * (float)sc;
-                    dm = dmin * (float)m;
+                    for (int i = 0; i < 4; ++i) {
+                        const uint32_t shift = 8 * i;
+                        const uint32_t l4 = (g & 1) ? ((ql >> (shift + 4)) & 15)
+                                                    : ((ql >> shift) & 15);
+                        const int q = (int)l4 | (((qh >> shift) & qhmask) ? 16 : 0);
+                        wq[i] = d * (float)q - dm;
+                    }
+#pragma unroll
+                    for (int t = 0; t < BATCH_NT; ++t) {
+                        if (FULL || t0 + t < n_tokens) {
+                            const float4 xv = __ldg((const float4 *)
+                                (x + (size_t)(t0 + t) * x_stride +
+                                 (size_t)b * BATCH_QK_K + g * 32 + 4 * (lane & 7)));
+                            sum[t] += (wq[0] * xv.x + wq[1] * xv.y) +
+                                      (wq[2] * xv.z + wq[3] * xv.w);
+                        }
+                    }
                 }
-                d = __shfl_sync(0xFFFFFFFFu, d, 0);
-                dm = __shfl_sync(0xFFFFFFFFu, dm, 0);
-                const uint8_t qh = __ldg(&blk->qh[lane]);
-                const uint8_t ql = __ldg(&blk->qs[32 * (s >> 1) + lane]);
-                const int q = ((s & 1) ? (ql >> 4) : (ql & 0xF)) |
-                              ((qh & (1u << s)) ? 16 : 0);
-                acc += (d * (float)q - dm) *
-                       __ldg(xr + (size_t)b * BATCH_QK_K + s * 32 + lane);
+            } else {
+#pragma unroll
+                for (int s = 0; s < 8; ++s) {
+                    float d = 0.0f, dm = 0.0f;
+                    if (lane == 0) {
+                        uint8_t sc, m;
+                        batch_get_scale_min_k4(s, blk->scales, sc, m);
+                        d = dall * (float)sc;
+                        dm = dmin * (float)m;
+                    }
+                    d = __shfl_sync(0xFFFFFFFFu, d, 0);
+                    dm = __shfl_sync(0xFFFFFFFFu, dm, 0);
+                    const uint8_t qh = __ldg(&blk->qh[lane]);
+                    const uint8_t ql = __ldg(&blk->qs[32 * (s >> 1) + lane]);
+                    const int q = ((s & 1) ? (ql >> 4) : (ql & 0xF)) |
+                                  ((qh & (1u << s)) ? 16 : 0);
+                    const float wq = d * (float)q - dm;
+#pragma unroll
+                    for (int t = 0; t < BATCH_NT; ++t) {
+                        if (FULL || t0 + t < n_tokens) {
+                            sum[t] += wq * __ldg(x + (size_t)(t0 + t) * x_stride +
+                                (size_t)b * BATCH_QK_K + s * 32 + lane);
+                        }
+                    }
+                }
             }
         }
-        sum += acc;
+        batch_mv_reduce8<FULL>(sum, out, row, out_stride, t0, n_tokens);
     }
-    batch_mv_reduce(sum, out + (size_t)tok * out_stride + row);
 }
 
+template<bool FULL, bool VX>
 __global__ void lcr_batch_matmul_q6_k(const uint8_t * __restrict__ blob, int in,
-                                      const float * __restrict__ x,
-                                      float * __restrict__ out, int64_t offset,
-                                      size_t row_bytes, int out_rows,
-                                      int x_stride, int out_stride) {
+                                       const float * __restrict__ x,
+                                       float * __restrict__ out, int64_t offset,
+                                       size_t row_bytes, int out_rows,
+                                       int x_stride, int out_stride,
+                                       int n_tokens) {
     const int lane = threadIdx.x & 31;
     const int wid = threadIdx.x >> 5;
     const int row = blockIdx.x * (BATCH_BLOCK_SIZE / 32) + wid;
-    const int tok = blockIdx.y;
     if (row >= out_rows) return;
     const uint8_t * __restrict__ w = blob + offset + (size_t)row * row_bytes;
-    const float * __restrict__ xr = x + (size_t)tok * x_stride;
     const int blocks = in >> 8;
-    const bool vx = (((uintptr_t)xr) & 15) == 0;
-    float sum = 0.0f;
-    for (int b = 0; b < blocks; ++b) {
-        const BatchBlockQ6_K *blk =
-            (const BatchBlockQ6_K *)(w + (size_t)b * sizeof(BatchBlockQ6_K));
-        const float d = batch_half2float(__ldg(&blk->d));
-        float acc = 0.0f;
-        // Q6_K blocks are 210 bytes, so use 2-byte loads for the 4-byte groups.
-        if (vx) {
-            const int gbase = lane >> 3;
+    float sum[BATCH_NT];
+    for (int t0 = 0; t0 < n_tokens; t0 += BATCH_NT) {
 #pragma unroll
-            for (int t = 0; t < 2; ++t) {
-                const int g = gbase + t * 4;
-                const int ip = g >> 2;
-                const int group = g & 3;
-                const int is0 = 8 * ip + 2 * group;
-                float s0 = 0.0f, s1 = 0.0f;
-                if ((lane & 7) == 0) {
-                    const uint16_t ss = __ldg((const uint16_t *)(blk->scales + is0));
-                    s0 = (float)(int8_t)ss;
-                    s1 = (float)(int8_t)(ss >> 8);
-                }
-                s0 = __shfl_sync(0xFFFFFFFFu, s0, 0, 8);
-                s1 = __shfl_sync(0xFFFFFFFFu, s1, 0, 8);
-                const uint16_t *qlp = (const uint16_t *)
-                    (blk->ql + 64 * ip + 32 * (group & 1) + 4 * (lane & 7));
-                const uint16_t *qhp = (const uint16_t *)
-                    (blk->qh + 32 * ip + 4 * (lane & 7));
-                const uint32_t ql = (uint32_t)__ldg(qlp) | ((uint32_t)__ldg(qlp + 1) << 16);
-                const uint32_t qh = (uint32_t)__ldg(qhp) | ((uint32_t)__ldg(qhp + 1) << 16);
-                const float4 xv = __ldg((const float4 *)
-                    (xr + (size_t)b * BATCH_QK_K + g * 32 + 4 * (lane & 7)));
-                const float sc = (lane & 7) < 4 ? s0 : s1;
+        for (int t = 0; t < BATCH_NT; ++t) sum[t] = 0.0f;
+        for (int b = 0; b < blocks; ++b) {
+            const BatchBlockQ6_K *blk =
+                (const BatchBlockQ6_K *)(w + (size_t)b * sizeof(BatchBlockQ6_K));
+            const float d = batch_half2float(__ldg(&blk->d));
+            // Q6_K blocks are 210 bytes, so use 2-byte loads for the 4-byte groups.
+            if (VX) {
+                const int gbase = lane >> 3;
 #pragma unroll
-                for (int i = 0; i < 4; ++i) {
-                    const uint32_t shift = 8 * i;
-                    const uint32_t lo = (group & 2) ? ((ql >> (shift + 4)) & 15)
-                                                    : ((ql >> shift) & 15);
-                    const uint32_t hi = ((qh >> shift) >> (2 * group)) & 3;
-                    const int q = (int)((int8_t)(lo | (hi << 4)) - 32);
-                    acc += (d * sc * (float)q) *
-                           (i == 0 ? xv.x : i == 1 ? xv.y : i == 2 ? xv.z : xv.w);
-                }
-            }
-        } else {
+                for (int t2 = 0; t2 < 2; ++t2) {
+                    const int g = gbase + t2 * 4;
+                    const int ip = g >> 2;
+                    const int group = g & 3;
+                    const int is0 = 8 * ip + 2 * group;
+                    float s0 = 0.0f, s1 = 0.0f;
+                    if ((lane & 7) == 0) {
+                        const uint16_t ss = __ldg((const uint16_t *)(blk->scales + is0));
+                        s0 = (float)(int8_t)ss;
+                        s1 = (float)(int8_t)(ss >> 8);
+                    }
+                    s0 = __shfl_sync(0xFFFFFFFFu, s0, 0, 8);
+                    s1 = __shfl_sync(0xFFFFFFFFu, s1, 0, 8);
+                    const uint16_t *qlp = (const uint16_t *)
+                        (blk->ql + 64 * ip + 32 * (group & 1) + 4 * (lane & 7));
+                    const uint16_t *qhp = (const uint16_t *)
+                        (blk->qh + 32 * ip + 4 * (lane & 7));
+                    const uint32_t ql = (uint32_t)__ldg(qlp) | ((uint32_t)__ldg(qlp + 1) << 16);
+                    const uint32_t qh = (uint32_t)__ldg(qhp) | ((uint32_t)__ldg(qhp + 1) << 16);
+                    const float sc = (lane & 7) < 4 ? s0 : s1;
+                    float wq[4];
 #pragma unroll
-            for (int s = 0; s < 8; ++s) {
-                const int ip = s >> 2;
-                const int group = s & 3;
-                const int is0 = 8 * ip + 2 * group;
-                float s0 = 0.0f, s1 = 0.0f;
-                if (lane == 0) {
-                    const uint16_t ss = __ldg((const uint16_t *)(blk->scales + is0));
-                    s0 = (float)(int8_t)ss;
-                    s1 = (float)(int8_t)(ss >> 8);
+                    for (int i = 0; i < 4; ++i) {
+                        const uint32_t shift = 8 * i;
+                        const uint32_t lo = (group & 2) ? ((ql >> (shift + 4)) & 15)
+                                                        : ((ql >> shift) & 15);
+                        const uint32_t hi = ((qh >> shift) >> (2 * group)) & 3;
+                        const int q = (int)((int8_t)(lo | (hi << 4)) - 32);
+                        wq[i] = d * sc * (float)q;
+                    }
+#pragma unroll
+                    for (int t = 0; t < BATCH_NT; ++t) {
+                        if (FULL || t0 + t < n_tokens) {
+                            const float4 xv = __ldg((const float4 *)
+                                (x + (size_t)(t0 + t) * x_stride +
+                                 (size_t)b * BATCH_QK_K + g * 32 + 4 * (lane & 7)));
+                            sum[t] += (wq[0] * xv.x + wq[1] * xv.y) +
+                                      (wq[2] * xv.z + wq[3] * xv.w);
+                        }
+                    }
                 }
-                s0 = __shfl_sync(0xFFFFFFFFu, s0, 0);
-                s1 = __shfl_sync(0xFFFFFFFFu, s1, 0);
-                const uint8_t ql = __ldg(&blk->ql[64 * ip + 32 * (group & 1) + lane]);
-                const uint8_t qh = __ldg(&blk->qh[32 * ip + lane]);
-                const uint8_t q4 = (group & 2) ? (ql >> 4) : (ql & 0xF);
-                const int q = (int)((int8_t)(q4 | ((qh >> (2 * group) & 3) << 4)) - 32);
-                acc += (d * (lane < 16 ? s0 : s1) * (float)q) *
-                       __ldg(xr + (size_t)b * BATCH_QK_K + s * 32 + lane);
+            } else {
+#pragma unroll
+                for (int s = 0; s < 8; ++s) {
+                    const int ip = s >> 2;
+                    const int group = s & 3;
+                    const int is0 = 8 * ip + 2 * group;
+                    float s0 = 0.0f, s1 = 0.0f;
+                    if (lane == 0) {
+                        const uint16_t ss = __ldg((const uint16_t *)(blk->scales + is0));
+                        s0 = (float)(int8_t)ss;
+                        s1 = (float)(int8_t)(ss >> 8);
+                    }
+                    s0 = __shfl_sync(0xFFFFFFFFu, s0, 0);
+                    s1 = __shfl_sync(0xFFFFFFFFu, s1, 0);
+                    const uint8_t ql = __ldg(&blk->ql[64 * ip + 32 * (group & 1) + lane]);
+                    const uint8_t qh = __ldg(&blk->qh[32 * ip + lane]);
+                    const uint8_t q4 = (group & 2) ? (ql >> 4) : (ql & 0xF);
+                    const int q = (int)((int8_t)(q4 | ((qh >> (2 * group) & 3) << 4)) - 32);
+                    const float wq = d * (lane < 16 ? s0 : s1) * (float)q;
+#pragma unroll
+                    for (int t = 0; t < BATCH_NT; ++t) {
+                        if (FULL || t0 + t < n_tokens) {
+                            sum[t] += wq * __ldg(x + (size_t)(t0 + t) * x_stride +
+                                (size_t)b * BATCH_QK_K + s * 32 + lane);
+                        }
+                    }
+                }
             }
         }
-        sum += acc;
+        batch_mv_reduce8<FULL>(sum, out, row, out_stride, t0, n_tokens);
     }
-    batch_mv_reduce(sum, out + (size_t)tok * out_stride + row);
 }
 
 // One switch per launch, never per element. Type is validated by caller.
 static int batch_launch_matmul(cudaStream_t stream, const uint8_t *blob, int type,
-                               int in, const float *x, float *out,
-                               int64_t offset, size_t row_bytes, int out_rows,
-                               int n_tokens, int x_stride, int out_stride) {
-    (void)n_tokens;
-#define BATCH_MV_LAUNCH(kernel) \
-    kernel<<<dim3((out_rows + BATCH_BLOCK_SIZE / 32 - 1) / (BATCH_BLOCK_SIZE / 32), \
-                  (unsigned int)n_tokens), BATCH_BLOCK_SIZE, 0, stream>>>( \
-        blob, in, x, out, offset, row_bytes, out_rows, x_stride, out_stride)
+                                int in, const float *x, float *out,
+                                int64_t offset, size_t row_bytes, int out_rows,
+                                int n_tokens, int x_stride, int out_stride) {
+#define BATCH_MV_LAUNCH(kernel, vx) do { \
+    dim3 grid((out_rows + BATCH_BLOCK_SIZE / 32 - 1) / (BATCH_BLOCK_SIZE / 32)); \
+    bool full = (n_tokens % BATCH_NT == 0); \
+    if (vx) { \
+        if (full) kernel<true, true><<<grid, BATCH_BLOCK_SIZE, 0, stream>>>( \
+            blob, in, x, out, offset, row_bytes, out_rows, x_stride, out_stride, n_tokens); \
+        else      kernel<false, true><<<grid, BATCH_BLOCK_SIZE, 0, stream>>>( \
+            blob, in, x, out, offset, row_bytes, out_rows, x_stride, out_stride, n_tokens); \
+    } else { \
+        if (full) kernel<true, false><<<grid, BATCH_BLOCK_SIZE, 0, stream>>>( \
+            blob, in, x, out, offset, row_bytes, out_rows, x_stride, out_stride, n_tokens); \
+        else      kernel<false, false><<<grid, BATCH_BLOCK_SIZE, 0, stream>>>( \
+            blob, in, x, out, offset, row_bytes, out_rows, x_stride, out_stride, n_tokens); \
+    } \
+} while (0)
+    // Vector paths need aligned activations, aligned weight base and strides
+    // that keep every token row at the same alignment.
+    const uintptr_t wb = (uintptr_t)blob + (uintptr_t)offset;
+    const bool vx4 = (in & 3) == 0 && (x_stride & 3) == 0 &&
+                     (wb & 15) == 0 && ((uintptr_t)x & 15) == 0 &&
+                     (row_bytes & 15) == 0;
+    const bool vx2 = (in & 3) == 0 && (x_stride & 3) == 0 &&
+                     (wb & 7) == 0 && ((uintptr_t)x & 15) == 0 &&
+                     (row_bytes & 7) == 0;
+    const bool vxq = ((uintptr_t)x & 15) == 0 && (x_stride & 3) == 0 && (wb & 3) == 0;
     switch (type) {
-    case BATCH_F32:  BATCH_MV_LAUNCH(lcr_batch_matmul_f32);  break;
-    case BATCH_F16:  BATCH_MV_LAUNCH(lcr_batch_matmul_f16);  break;
-    case BATCH_BF16: BATCH_MV_LAUNCH(lcr_batch_matmul_bf16); break;
-    case BATCH_Q8_0: BATCH_MV_LAUNCH(lcr_batch_matmul_q8_0); break;
-    case BATCH_Q4_K: BATCH_MV_LAUNCH(lcr_batch_matmul_q4_k); break;
-    case BATCH_Q5_K: BATCH_MV_LAUNCH(lcr_batch_matmul_q5_k); break;
-    case BATCH_Q6_K: BATCH_MV_LAUNCH(lcr_batch_matmul_q6_k); break;
+    case BATCH_F32:  BATCH_MV_LAUNCH(lcr_batch_matmul_f32,  vx4); break;
+    case BATCH_F16:  BATCH_MV_LAUNCH(lcr_batch_matmul_f16,  vx2); break;
+    case BATCH_BF16: BATCH_MV_LAUNCH(lcr_batch_matmul_bf16, vx2); break;
+    case BATCH_Q8_0: BATCH_MV_LAUNCH(lcr_batch_matmul_q8_0, false); break;
+    case BATCH_Q4_K: BATCH_MV_LAUNCH(lcr_batch_matmul_q4_k, vxq); break;
+    case BATCH_Q5_K: BATCH_MV_LAUNCH(lcr_batch_matmul_q5_k, vxq); break;
+    case BATCH_Q6_K: BATCH_MV_LAUNCH(lcr_batch_matmul_q6_k, vxq); break;
     default: return BATCH_ERR_TYPE;
     }
 #undef BATCH_MV_LAUNCH
