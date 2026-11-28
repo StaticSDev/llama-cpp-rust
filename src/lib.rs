@@ -29,6 +29,7 @@ pub mod quant;
 pub mod runtime;
 pub mod r#impl;
 pub mod sampler;
+pub mod sampling;
 pub mod tools;
 pub mod unicode;
 pub mod vocab;
