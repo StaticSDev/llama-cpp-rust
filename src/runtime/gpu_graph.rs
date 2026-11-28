@@ -31,7 +31,6 @@ struct Dims {
     nv: i32,
     ds: i32,
     key_dim: i32,
-    value_dim: i32,
     channels: i32,
     ksize: i32,
     seq_cap: i32,
@@ -202,7 +201,6 @@ impl GpuWorkspace {
             nv: to_i32(p.ssm_dt_rank, "ssm_dt_rank")?,
             ds: to_i32(p.ssm_state, "ssm_state")?,
             key_dim: to_i32(key_dim, "ssm key_dim")?,
-            value_dim: to_i32(value_dim, "ssm value_dim")?,
             channels: to_i32(channels, "ssm channels")?,
             ksize: to_i32(p.conv_kernel, "conv_kernel")?,
             seq_cap: to_i32(seq_cap, "seq_cap")?,
@@ -329,8 +327,6 @@ impl GpuWorkspace {
             };
             layers.push(LayerIdx { common, rec, full });
         }
-        drop(alloc);
-        drop(resolve_small);
         drop(resolve);
 
         let p = w.params.clone();
@@ -398,7 +394,13 @@ impl GpuWorkspace {
         let mut fi = 0usize;
         for il in 0..d.n_layer {
             let layer = &self.layers[il];
-            cuda.op_rmsnorm(self.x, layer.common.norm, self.norm, d.n_embd, self.eps)?;
+            cuda.op_rmsnorm(
+                self.x,
+                layer.common.norm.cast::<f32>(),
+                self.norm,
+                d.n_embd,
+                self.eps,
+            )?;
 
             if self.p.is_recurrent(il) {
                 let r = layer
@@ -528,7 +530,7 @@ impl GpuWorkspace {
             cuda.op_add(self.x, self.attn, d.n_embd)?;
             cuda.op_rmsnorm(
                 self.x,
-                layer.common.post_norm,
+                layer.common.post_norm.cast::<f32>(),
                 self.norm2,
                 d.n_embd,
                 self.eps,
@@ -540,7 +542,13 @@ impl GpuWorkspace {
             cuda.op_add(self.x, self.ffn, d.n_embd)?;
         }
 
-        cuda.op_rmsnorm(self.x, self.out_norm, self.h, d.n_embd, self.eps)?;
+        cuda.op_rmsnorm(
+            self.x,
+            self.out_norm.cast::<f32>(),
+            self.h,
+            d.n_embd,
+            self.eps,
+        )?;
         cuda.matvec_device(self.emb_idx, self.h, self.logits)?;
         cuda.op_argmax(self.logits, d.vocab, self.argmax.cast::<i32>())?;
         let mut next = 0i32;
