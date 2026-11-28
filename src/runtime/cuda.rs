@@ -50,6 +50,7 @@ unsafe extern "C" {
         out_stride: c_int,
     ) -> c_int;
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     fn lcr_batch_conv_silu(
         ctx: *mut c_void,
         w: *const f32,
@@ -64,6 +65,7 @@ unsafe extern "C" {
         stride: c_int,
     ) -> c_int;
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     fn lcr_batch_gdn(
         ctx: *mut c_void,
         q: *const f32,
@@ -83,6 +85,7 @@ unsafe extern "C" {
         d: c_int,
     ) -> c_int;
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     fn lcr_batch_attn(
         ctx: *mut c_void,
         q: *const f32,
@@ -425,6 +428,7 @@ impl CudaWeights {
 
     /// Sequential conv+SiLU over a chunk, updating conv history in place.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub(crate) fn batch_conv_silu(
         &self,
         w: *const f32,
@@ -448,6 +452,7 @@ impl CudaWeights {
 
     /// Sequential GDN recurrence over a chunk; output token stride is `v_stride`.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub(crate) fn batch_gdn(
         &self,
         q: *const f32,
@@ -477,6 +482,7 @@ impl CudaWeights {
 
     /// Batched KV cache store plus causal attention over a chunk.
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub(crate) fn batch_attn(
         &self,
         q: *const f32,
