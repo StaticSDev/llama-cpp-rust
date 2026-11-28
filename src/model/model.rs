@@ -3,7 +3,7 @@
 use super::buffers::{assign_devices, ModelImpl};
 use super::types::*;
 use super::{hparams as hp, tensors as tn, LlamaModelLoader};
-use crate::arch::{arch_supports_sm_tensor, Arch};
+use crate::arch::Arch;
 use crate::core::{Error, Result, Token};
 use crate::hparams::Hparams;
 use crate::vocab::LlamaVocab;
@@ -162,20 +162,64 @@ pub struct LlamaModel {
     pub impl_state: ModelImpl,
 }
 
+/// Cumulative split points used to place layers across devices.
+/// Negative or non-finite weights clamp to zero; all-zero falls back to an even split.
+fn tensor_split_points(split: &[f32], n_devices: usize) -> Vec<f32> {
+    if n_devices == 0 {
+        return Vec::new();
+    }
+    let mut weights: Vec<f32> = (0..n_devices)
+        .map(|i| split.get(i).copied().unwrap_or(0.0))
+        .map(|w| if w.is_finite() { w.max(0.0) } else { 0.0 })
+        .collect();
+    let sum: f32 = weights.iter().sum();
+    if sum == 0.0 {
+        return (1..=n_devices)
+            .map(|i| i as f32 / n_devices as f32)
+            .collect();
+    }
+    let mut acc = 0.0;
+    for w in &mut weights {
+        acc += *w / sum;
+        *w = acc;
+    }
+    if let Some(last) = weights.last_mut() {
+        *last = 1.0;
+    }
+    weights
+}
+
+/// Device index for each of `n_layers` layers, using `upper_bound` semantics
+/// so a layer on a split boundary goes to the later device.
+fn tensor_split_layer_devices(split: &[f32], n_devices: usize, n_layers: usize) -> Vec<usize> {
+    if n_devices == 0 || n_layers == 0 {
+        return vec![0; n_layers];
+    }
+    let points = tensor_split_points(split, n_devices);
+    (0..n_layers)
+        .map(|il| {
+            let frac = il as f32 / n_layers as f32;
+            points
+                .iter()
+                .take(n_devices)
+                .filter(|&&p| p <= frac)
+                .count()
+                .min(n_devices - 1)
+        })
+        .collect()
+}
+
 impl LlamaModel {
     /// `llama_model_create(arch, params)`.
     pub fn create(arch: Arch, params: ModelParams) -> Result<Self> {
         if arch == Arch::Unknown {
             return Err(Error::new("unknown model architecture: 'unknown'"));
         }
-        if params.split_mode == SplitMode::Tensor && !arch_supports_sm_tensor(arch) {
-            return Err(Error::new(format!(
-                "LLAMA_SPLIT_MODE_TENSOR not implemented for architecture '{}'",
-                arch.name()
-            )));
-        }
         let mut res = Self::new(arch, params);
         res.impl_state = assign_devices(&res)?;
+        if res.split_mode() == SplitMode::Tensor {
+            res.apply_tensor_split();
+        }
         Ok(res)
     }
 
@@ -188,6 +232,40 @@ impl LlamaModel {
             )));
         }
         Self::create(ml.arch, params)
+    }
+
+    // The backend stand-ins have no meta/split buffer, so a tensor cannot be
+    // split at execution time. Whole layers are placed by cumulative split,
+    // and the exact per-tensor split is exposed by `tensor_split_state`.
+    fn apply_tensor_split(&mut self) {
+        let n_devices = self.devices.len().max(1);
+        let n_layers = self.hparams.n_layer_all.max(0) as usize;
+        let assignment = tensor_split_layer_devices(self.tensor_split(), n_devices, n_layers + 1);
+        let gpu_bufts = self.impl_state.gpu_buft_list.clone();
+        for (il, layer) in self.impl_state.dev_layer.iter_mut().enumerate() {
+            let dev = assignment[il];
+            layer.device = dev;
+            if let Some(bufts) = gpu_bufts.get(dev) {
+                layer.bufts = bufts.clone();
+            }
+        }
+        if let Some(&dev) = assignment.last() {
+            self.impl_state.dev_output.device = dev;
+            if let Some(bufts) = gpu_bufts.get(dev) {
+                self.impl_state.dev_output.bufts = bufts.clone();
+            }
+        }
+    }
+
+    /// `llama_meta_device_get_split_state` for one tensor under tensor split.
+    pub fn tensor_split_state(&self, name: &str) -> Result<MetaSplitState> {
+        super::buffers::meta_device_get_split_state(
+            self,
+            name,
+            &SplitStateUserdata {
+                n_devices: self.devices.len(),
+            },
+        )
     }
 
     pub fn new(arch: Arch, params: ModelParams) -> Self {
@@ -560,5 +638,67 @@ impl LlamaModel {
     /// Delegate used by arch-specific modules that need custom tensors.
     pub fn load_arch_tensors_hook(&mut self, ml: &mut LlamaModelLoader) -> Result<()> {
         tn::load_arch_tensors(self, ml)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tensor_split_none_falls_back_to_even() {
+        assert_eq!(tensor_split_points(&[], 2), vec![0.5, 1.0]);
+        assert_eq!(tensor_split_layer_devices(&[], 2, 2), vec![0, 1]);
+    }
+
+    #[test]
+    fn tensor_split_even_distributes_layers() {
+        assert_eq!(tensor_split_points(&[1.0, 1.0], 2), vec![0.5, 1.0]);
+        assert_eq!(
+            tensor_split_layer_devices(&[1.0, 1.0, 1.0, 1.0], 4, 8),
+            vec![0, 0, 1, 1, 2, 2, 3, 3]
+        );
+    }
+
+    #[test]
+    fn tensor_split_uneven_favors_larger_weight() {
+        assert_eq!(tensor_split_points(&[3.0, 1.0], 2), vec![0.75, 1.0]);
+        assert_eq!(
+            tensor_split_layer_devices(&[3.0, 1.0], 2, 4),
+            vec![0, 0, 0, 1]
+        );
+    }
+
+    #[test]
+    fn tensor_split_clamps_zero_and_negative() {
+        assert_eq!(
+            tensor_split_points(&[0.0, -2.0, 0.0], 3),
+            vec![1.0 / 3.0, 2.0 / 3.0, 1.0]
+        );
+        assert_eq!(
+            tensor_split_layer_devices(&[0.0, -2.0, 4.0], 3, 3),
+            vec![2, 2, 2]
+        );
+    }
+
+    #[test]
+    fn create_accepts_tensor_split_mode_without_gpu() {
+        let gpu = Device {
+            name: "GPU0".to_owned(),
+            backend_id: 1,
+            free_memory: 1024,
+            total_memory: 2048,
+            ..Device::cpu()
+        };
+        let params = ModelParams {
+            split_mode: SplitMode::Tensor,
+            tensor_split: vec![0.5, 0.5],
+            devices: vec![Device::cpu(), gpu],
+            ..Default::default()
+        };
+        let model = LlamaModel::create(Arch::Llama, params).unwrap();
+        assert_eq!(model.split_mode(), SplitMode::Tensor);
+        assert_eq!(model.tensor_split(), &[0.5, 0.5]);
+        assert_eq!(model.dev_output(), 0);
     }
 }
