@@ -1,0 +1,42 @@
+{
+  "url": "http://127.0.0.1:8080",
+  "prompt_words": 40,
+  "prompt_chars": 249,
+  "runs": 2,
+  "samples": {
+    "32": [
+      {
+        "prompt_tokens": 78,
+        "prompt_ms": 2982,
+        "prompt_tok_s": 26.15694236755371,
+        "tokens": 32,
+        "gen_ms": 1474,
+        "tok_s": 21.709632873535156,
+        "run": 1,
+        "n_predict": 32
+      },
+      {
+        "prompt_tokens": 78,
+        "prompt_ms": 2969,
+        "prompt_tok_s": 26.27147102355957,
+        "tokens": 32,
+        "gen_ms": 1498,
+        "tok_s": 21.36181640625,
+        "run": 2,
+        "n_predict": 32
+      }
+    ]
+  },
+  "summary": {
+    "32": {
+      "prompt_tok_s": {
+        "mean": 26.21,
+        "min": 26.16
+      },
+      "tok_s": {
+        "mean": 21.54,
+        "min": 21.36
+      }
+    }
+  }
+}
