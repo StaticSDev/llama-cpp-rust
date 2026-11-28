@@ -150,6 +150,15 @@ unsafe extern "C" {
         n: c_int,
         eps: f32,
     ) -> c_int;
+    fn lcr_op_add_rmsnorm(
+        ctx: *mut c_void,
+        x: *mut f32,
+        add: *const f32,
+        w: *const f32,
+        norm: *mut f32,
+        n: c_int,
+        eps: f32,
+    ) -> c_int;
     fn lcr_op_l2norm(ctx: *mut c_void, x: *mut f32, n: c_int, eps: f32) -> c_int;
     fn lcr_op_rope(
         ctx: *mut c_void,
@@ -627,6 +636,19 @@ impl CudaWeights {
     ) -> Result<()> {
         let rc = unsafe { lcr_op_rmsnorm(self.ctx, x, w, y, n, eps) };
         check_rc("lcr_op_rmsnorm", rc)
+    }
+
+    pub(crate) fn op_add_rmsnorm(
+        &self,
+        x: *mut f32,
+        add: *const f32,
+        w: *const f32,
+        norm: *mut f32,
+        n: c_int,
+        eps: f32,
+    ) -> Result<()> {
+        let rc = unsafe { lcr_op_add_rmsnorm(self.ctx, x, add, w, norm, n, eps) };
+        check_rc("lcr_op_add_rmsnorm", rc)
     }
 
     #[allow(dead_code)]

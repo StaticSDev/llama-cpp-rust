@@ -601,9 +601,9 @@ impl GpuWorkspace {
                 fi += 1;
             }
 
-            cuda.op_add(self.x, self.attn, d.n_embd)?;
-            cuda.op_rmsnorm(
+            cuda.op_add_rmsnorm(
                 self.x,
+                self.attn,
                 layer.common.post_norm.cast::<f32>(),
                 self.norm2,
                 d.n_embd,
@@ -901,9 +901,9 @@ impl GpuWorkspace {
 
                 for t in 0..nt {
                     let xi = self.batch_x.wrapping_add(t * e);
-                    cuda.op_add(xi, self.batch_attn.wrapping_add(t * e), d.n_embd)?;
-                    cuda.op_rmsnorm(
+                    cuda.op_add_rmsnorm(
                         xi,
+                        self.batch_attn.wrapping_add(t * e),
                         layer.common.post_norm.cast::<f32>(),
                         self.batch_norm2.wrapping_add(t * e),
                         d.n_embd,

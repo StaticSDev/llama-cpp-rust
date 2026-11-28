@@ -50,6 +50,10 @@ void *lcr_gpu_weight_ptr(void *ctx, int index);
  * Each call launches on the context stream and returns without synchronizing;
  * call lcr_gpu_sync once to wait for the whole token. */
 int lcr_op_rmsnorm(void *ctx, const float *x, const float *w, float *y, int n, float eps);
+/* x[i] += add[i]; then norm[i] = rmsnorm(x, w)[i]. One launch on the context
+ * stream. norm may alias x only when each element is read before it is written. */
+int lcr_op_add_rmsnorm(void *ctx, float *x, const float *add, const float *w,
+                       float *norm, int n, float eps);
 int lcr_op_l2norm(void *ctx, float *x, int n, float eps);
 int lcr_op_rope(void *ctx, float *x, int n, int n_rot, float base, int pos);
 int lcr_op_add(void *ctx, float *dst, const float *src, int n);

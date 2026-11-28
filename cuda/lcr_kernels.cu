@@ -1048,6 +1048,28 @@ __global__ void lcr_rmsnorm_kernel(const float *x, const float *w, float *y,
     }
 }
 
+// Fused residual add then RMSNorm. The barrier makes every x update visible
+// before the sum of squares; norm == x is safe because each thread reads x[i]
+// before writing its own norm[i].
+__global__ void lcr_add_rmsnorm_kernel(float *x, const float *add,
+                                       const float *w, float *norm,
+                                       int n, float eps) {
+    __shared__ float tmp[LCR_BLOCK_SIZE / 32];
+    const int tid = threadIdx.x;
+    for (int i = tid; i < n; i += LCR_BLOCK_SIZE) {
+        x[i] += add[i];
+    }
+    __syncthreads();
+    float ss = 0.0f;
+    for (int i = tid; i < n; i += LCR_BLOCK_SIZE) {
+        ss += x[i] * x[i];
+    }
+    const float inv = rsqrtf(lcr_block_sum(ss, tmp) / (float)n + eps);
+    for (int i = tid; i < n; i += LCR_BLOCK_SIZE) {
+        norm[i] = x[i] * w[i] * inv;
+    }
+}
+
 __global__ void lcr_l2norm_kernel(float *x, int n, float eps) {
     __shared__ float tmp[LCR_BLOCK_SIZE / 32];
     const int tid = threadIdx.x;
@@ -1539,6 +1561,22 @@ int lcr_op_rmsnorm(void *ctx, const float *x, const float *w, float *y,
         return LCR_ERR_CUDA;
     }
     lcr_rmsnorm_kernel<<<1, LCR_BLOCK_SIZE, 0, c->stream>>>(x, w, y, n, eps);
+    if (cudaGetLastError() != cudaSuccess) {
+        return LCR_ERR_CUDA;
+    }
+    return LCR_OK;
+}
+
+int lcr_op_add_rmsnorm(void *ctx, float *x, const float *add, const float *w,
+                       float *norm, int n, float eps) {
+    if (!ctx || !x || !add || !w || !norm || n <= 0 || eps < 0.0f) {
+        return LCR_ERR_ARG;
+    }
+    LcrContext *c = (LcrContext *)ctx;
+    if (cudaSetDevice(c->device) != cudaSuccess) {
+        return LCR_ERR_CUDA;
+    }
+    lcr_add_rmsnorm_kernel<<<1, LCR_BLOCK_SIZE, 0, c->stream>>>(x, add, w, norm, n, eps);
     if (cudaGetLastError() != cudaSuccess) {
         return LCR_ERR_CUDA;
     }
