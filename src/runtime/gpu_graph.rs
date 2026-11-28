@@ -10,7 +10,7 @@ use std::ffi::c_void;
 use std::ptr;
 use std::sync::Arc;
 
-const PREFILL_CHUNK: usize = 8;
+const PREFILL_CHUNK: usize = 16;
 
 fn checked_mul(a: usize, b: usize, what: &str) -> Result<usize> {
     a.checked_mul(b)
