@@ -1,0 +1,558 @@
+//! GPU-resident, sequential-token forward pass for Qwen3.5 hybrid layers.
+//!
+//! `GpuWorkspace` owns every device buffer once. `forward_token` mirrors
+//! `runtime::qwen35::forward` but keeps all intermediates on the device.
+
+use crate::core::{Error, Result};
+use crate::runtime::cuda::CudaWeights;
+use crate::runtime::types::{ModelParams, Weight, Weights};
+use std::ffi::c_void;
+use std::ptr;
+use std::sync::Arc;
+
+fn checked_mul(a: usize, b: usize, what: &str) -> Result<usize> {
+    a.checked_mul(b)
+        .ok_or_else(|| Error::new(format!("{what} size overflow")))
+}
+
+fn to_i32(v: usize, what: &str) -> Result<i32> {
+    i32::try_from(v)
+        .map_err(|_| Error::new(format!("{what} too large for a CUDA kernel dimension")))
+}
+
+#[derive(Clone, Copy)]
+struct Dims {
+    n_embd: i32,
+    n_head: i32,
+    n_kv: i32,
+    hd: i32,
+    n_ff: i32,
+    nk: i32,
+    nv: i32,
+    ds: i32,
+    key_dim: i32,
+    value_dim: i32,
+    channels: i32,
+    ksize: i32,
+    seq_cap: i32,
+    vocab: i32,
+    n_layer: usize,
+    head_bytes: usize,
+    hist_bytes: usize,
+}
+
+struct CommonIdx {
+    norm: *mut c_void,
+    post_norm: *mut c_void,
+    up: i32,
+    gate: i32,
+    down: i32,
+}
+
+struct RecIdx {
+    qkv: i32,
+    z: i32,
+    beta: i32,
+    alpha: i32,
+    out: i32,
+    dt_bias: *mut c_void,
+    a: *mut c_void,
+    conv: *mut c_void,
+    norm: *mut c_void,
+}
+
+struct FullIdx {
+    q: i32,
+    k: i32,
+    v: i32,
+    out: i32,
+    q_norm: *mut c_void,
+    k_norm: *mut c_void,
+}
+
+struct LayerIdx {
+    common: CommonIdx,
+    rec: Option<RecIdx>,
+    full: Option<FullIdx>,
+}
+
+struct RecState {
+    /// Two alternating `(conv_kernel - 1) * channels` histories.
+    hist: [*mut c_void; 2],
+    cur: usize,
+    state: *mut c_void,
+}
+
+struct FullState {
+    kc: *mut c_void,
+    vc: *mut c_void,
+}
+
+/// All device state for one greedy, single-sequence decode.
+pub struct GpuWorkspace {
+    cuda: Arc<CudaWeights>,
+    p: ModelParams,
+    d: Dims,
+    eps: f32,
+    rope_base: f32,
+    n_rot: i32,
+    scale: f32,
+    emb_idx: i32,
+    out_norm: *mut c_void,
+    buffers: Vec<*mut c_void>,
+    x: *mut f32,
+    norm: *mut f32,
+    qkv: *mut f32,
+    z: *mut f32,
+    beta_raw: *mut f32,
+    alpha_raw: *mut f32,
+    beta: *mut f32,
+    gate: *mut f32,
+    conv_out: *mut f32,
+    gdn_out: *mut f32,
+    heads: *mut f32,
+    gates: *mut f32,
+    head_k: *mut f32,
+    head_v: *mut f32,
+    attn_out: *mut f32,
+    attn: *mut f32,
+    norm2: *mut f32,
+    up: *mut f32,
+    gate_ffn: *mut f32,
+    ffn: *mut f32,
+    h: *mut f32,
+    logits: *mut f32,
+    argmax: *mut f32,
+    layers: Vec<LayerIdx>,
+    rec_states: Vec<RecState>,
+    full_states: Vec<FullState>,
+}
+
+impl GpuWorkspace {
+    pub fn new(cuda: Arc<CudaWeights>, w: &Weights) -> Result<Self> {
+        let p = &w.params;
+        if p.n_layer == 0
+            || p.n_embd == 0
+            || p.n_head == 0
+            || p.n_head_kv == 0
+            || p.head_dim == 0
+            || p.n_ff == 0
+            || p.full_attn_interval == 0
+            || p.ssm_state == 0
+            || p.ssm_group == 0
+            || p.ssm_dt_rank == 0
+            || p.conv_kernel == 0
+        {
+            return Err(Error::new("invalid model parameters for GPU graph"));
+        }
+        let emb = w.get("token_embd.weight")?;
+        let vocab = emb.out_features();
+        if vocab == 0 {
+            return Err(Error::new("empty token embedding"));
+        }
+
+        let n_em = p.n_embd;
+        let nf = p.n_ff;
+        let nhd = checked_mul(p.n_head, p.head_dim, "q head elements")?;
+        let qg_dim = checked_mul(nhd, 2, "q plus gate elements")?;
+        let kv_dim = checked_mul(p.n_head_kv, p.head_dim, "kv head elements")?;
+        if p.n_embd != nhd {
+            return Err(Error::new(format!(
+                "embedding {} does not match {} heads x {} head_dim",
+                p.n_embd, p.n_head, p.head_dim
+            )));
+        }
+        let key_dim = checked_mul(p.ssm_state, p.ssm_group, "ssm key dim")?;
+        let value_dim = checked_mul(p.ssm_state, p.ssm_dt_rank, "ssm value dim")?;
+        let channels = checked_mul(key_dim, 2, "ssm key dims")?
+            .checked_add(value_dim)
+            .ok_or_else(|| Error::new("ssm channel count overflow"))?;
+        let hist_floats = if p.conv_kernel > 1 {
+            checked_mul(p.conv_kernel - 1, channels, "conv history")?
+        } else {
+            0
+        };
+        let state_floats = checked_mul(
+            checked_mul(p.ssm_dt_rank, p.ssm_state, "ssm state rank")?,
+            p.ssm_state,
+            "ssm state size",
+        )?;
+
+        // Cap KV at 4096 tokens so eight full-attention caches fit in 6 GB VRAM.
+        let seq_cap = p.n_ctx.min(4096);
+        if seq_cap == 0 {
+            return Err(Error::new("zero context length"));
+        }
+        let kvc_floats = checked_mul(
+            checked_mul(p.n_head_kv, seq_cap, "kv cache tokens")?,
+            p.head_dim,
+            "kv cache elements",
+        )?;
+        let head_bytes = checked_mul(nhd, std::mem::size_of::<f32>(), "head buffer")?;
+        let hist_bytes = checked_mul(hist_floats, std::mem::size_of::<f32>(), "conv history")?;
+        let qkv_floats = channels.max(qg_dim);
+
+        let d = Dims {
+            n_embd: to_i32(n_em, "n_embd")?,
+            n_head: to_i32(p.n_head, "n_head")?,
+            n_kv: to_i32(p.n_head_kv, "n_head_kv")?,
+            hd: to_i32(p.head_dim, "head_dim")?,
+            n_ff: to_i32(nf, "n_ff")?,
+            nk: to_i32(p.ssm_group, "ssm_group")?,
+            nv: to_i32(p.ssm_dt_rank, "ssm_dt_rank")?,
+            ds: to_i32(p.ssm_state, "ssm_state")?,
+            key_dim: to_i32(key_dim, "ssm key_dim")?,
+            value_dim: to_i32(value_dim, "ssm value_dim")?,
+            channels: to_i32(channels, "ssm channels")?,
+            ksize: to_i32(p.conv_kernel, "conv_kernel")?,
+            seq_cap: to_i32(seq_cap, "seq_cap")?,
+            vocab: to_i32(vocab, "vocab_size")?,
+            n_layer: p.n_layer,
+            head_bytes,
+            hist_bytes,
+        };
+
+        let resolve = |name: &str, in_dim: usize, out_dim: usize| -> Result<(i32, *mut c_void)> {
+            let wt: &Weight = w.get(name)?;
+            if wt.in_features() != in_dim || wt.out_features() != out_dim {
+                return Err(Error::new(format!(
+                    "{name} shape [{}, {}] expected [{in_dim}, {out_dim}]",
+                    wt.in_features(),
+                    wt.out_features()
+                )));
+            }
+            let index = cuda.index_of(wt)?;
+            let ptr = cuda.weight_ptr(index)?;
+            Ok((index, ptr))
+        };
+        let resolve_small = |name: &str, len: usize| -> Result<*mut c_void> {
+            if !w.small.contains_key(name) {
+                return Err(Error::new(format!("{name} is not a device F32 vector")));
+            }
+            Ok(resolve(name, len, 1)?.1)
+        };
+
+        let (emb_idx, _) = resolve("token_embd.weight", n_em, vocab)?;
+        let out_norm = resolve_small("output_norm.weight", n_em)?;
+
+        let mut buffers: Vec<*mut c_void> = Vec::new();
+        let mut alloc = |floats: usize, name: &str| -> Result<*mut f32> {
+            let bytes = checked_mul(floats, std::mem::size_of::<f32>(), name)?;
+            let ptr = cuda.buf(bytes)?;
+            buffers.push(ptr);
+            cuda.zero(ptr, bytes)?;
+            Ok(ptr.cast::<f32>())
+        };
+
+        let x = alloc(n_em, "x")?;
+        let norm = alloc(n_em, "norm")?;
+        let qkv = alloc(qkv_floats, "qkv")?;
+        let z = alloc(value_dim, "z")?;
+        let beta_raw = alloc(p.ssm_dt_rank, "beta_raw")?;
+        let alpha_raw = alloc(p.ssm_dt_rank, "alpha_raw")?;
+        let beta = alloc(p.ssm_dt_rank, "beta")?;
+        let gate = alloc(p.ssm_dt_rank, "gate")?;
+        let conv_out = alloc(channels, "conv_out")?;
+        let gdn_out = alloc(value_dim, "gdn_out")?;
+        let heads = alloc(nhd, "heads")?;
+        let gates = alloc(nhd, "gates")?;
+        let head_k = alloc(kv_dim, "head_k")?;
+        let head_v = alloc(kv_dim, "head_v")?;
+        let attn_out = alloc(nhd, "attn_out")?;
+        let attn = alloc(n_em, "attn")?;
+        let norm2 = alloc(n_em, "norm2")?;
+        let up = alloc(nf, "up")?;
+        let gate_ffn = alloc(nf, "gate_ffn")?;
+        let ffn = alloc(n_em, "ffn")?;
+        let h = alloc(n_em, "h")?;
+        let logits = alloc(vocab, "logits")?;
+        let argmax = alloc(1, "argmax")?;
+
+        let mut layers = Vec::with_capacity(p.n_layer);
+        let mut rec_states = Vec::new();
+        let mut full_states = Vec::new();
+        for il in 0..p.n_layer {
+            let norm_name = format!("blk.{il}.attn_norm.weight");
+            let post_name = format!("blk.{il}.post_attention_norm.weight");
+            let common = CommonIdx {
+                norm: resolve_small(&norm_name, n_em)?,
+                post_norm: resolve_small(&post_name, n_em)?,
+                up: resolve(&format!("blk.{il}.ffn_up.weight"), n_em, nf)?.0,
+                gate: resolve(&format!("blk.{il}.ffn_gate.weight"), n_em, nf)?.0,
+                down: resolve(&format!("blk.{il}.ffn_down.weight"), nf, n_em)?.0,
+            };
+
+            let (rec, full) = if p.is_recurrent(il) {
+                let conv_name = format!("blk.{il}.ssm_conv1d.weight");
+                let rec_idx = RecIdx {
+                    qkv: resolve(&format!("blk.{il}.attn_qkv.weight"), n_em, channels)?.0,
+                    z: resolve(&format!("blk.{il}.attn_gate.weight"), n_em, value_dim)?.0,
+                    beta: resolve(&format!("blk.{il}.ssm_beta.weight"), n_em, p.ssm_dt_rank)?.0,
+                    alpha: resolve(&format!("blk.{il}.ssm_alpha.weight"), n_em, p.ssm_dt_rank)?.0,
+                    out: resolve(&format!("blk.{il}.ssm_out.weight"), value_dim, n_em)?.0,
+                    dt_bias: resolve_small(&format!("blk.{il}.ssm_dt.bias"), p.ssm_dt_rank)?,
+                    a: resolve_small(&format!("blk.{il}.ssm_a"), p.ssm_dt_rank)?,
+                    conv: resolve_small(
+                        &conv_name,
+                        checked_mul(p.conv_kernel, channels, "conv kernel")?,
+                    )?,
+                    norm: resolve_small(&format!("blk.{il}.ssm_norm.weight"), p.ssm_state)?,
+                };
+                let hist = if hist_bytes > 0 {
+                    [
+                        alloc(hist_floats, "conv history 0")?.cast::<c_void>(),
+                        alloc(hist_floats, "conv history 1")?.cast::<c_void>(),
+                    ]
+                } else {
+                    [ptr::null_mut(), ptr::null_mut()]
+                };
+                let state = alloc(state_floats, "ssm state")?.cast::<c_void>();
+                rec_states.push(RecState {
+                    hist,
+                    cur: 0,
+                    state,
+                });
+                (Some(rec_idx), None)
+            } else {
+                let full_idx = FullIdx {
+                    q: resolve(&format!("blk.{il}.attn_q.weight"), n_em, qg_dim)?.0,
+                    k: resolve(&format!("blk.{il}.attn_k.weight"), n_em, kv_dim)?.0,
+                    v: resolve(&format!("blk.{il}.attn_v.weight"), n_em, kv_dim)?.0,
+                    out: resolve(&format!("blk.{il}.attn_output.weight"), nhd, n_em)?.0,
+                    q_norm: resolve_small(&format!("blk.{il}.attn_q_norm.weight"), p.head_dim)?,
+                    k_norm: resolve_small(&format!("blk.{il}.attn_k_norm.weight"), p.head_dim)?,
+                };
+                let kc = alloc(kvc_floats, "k cache")?.cast::<c_void>();
+                let vc = alloc(kvc_floats, "v cache")?.cast::<c_void>();
+                full_states.push(FullState { kc, vc });
+                (None, Some(full_idx))
+            };
+            layers.push(LayerIdx { common, rec, full });
+        }
+        drop(alloc);
+        drop(resolve_small);
+        drop(resolve);
+
+        let p = w.params.clone();
+        let n_rot = to_i32(p.rope_dim.min(p.head_dim), "rope_dim")?;
+        let scale = 1.0f32 / (p.head_dim as f32).sqrt();
+        Ok(Self {
+            cuda,
+            p,
+            d,
+            eps: w.params.eps,
+            rope_base: w.params.rope_base,
+            n_rot,
+            scale,
+            emb_idx,
+            out_norm,
+            buffers,
+            x,
+            norm,
+            qkv,
+            z,
+            beta_raw,
+            alpha_raw,
+            beta,
+            gate,
+            conv_out,
+            gdn_out,
+            heads,
+            gates,
+            head_k,
+            head_v,
+            attn_out,
+            attn,
+            norm2,
+            up,
+            gate_ffn,
+            ffn,
+            h,
+            logits,
+            argmax,
+            layers,
+            rec_states,
+            full_states,
+        })
+    }
+
+    pub fn forward_token(&mut self, w: &Weights, token: i32, pos: usize) -> Result<i32> {
+        let d = self.d;
+        if w.params.n_layer != d.n_layer {
+            return Err(Error::new("model changed after GPU workspace creation"));
+        }
+        if token < 0 || token as usize >= d.vocab as usize {
+            return Err(Error::new("token id outside vocabulary"));
+        }
+        if pos >= d.seq_cap as usize {
+            return Err(Error::new(format!(
+                "position {pos} exceeds GPU KV capacity {}",
+                d.seq_cap
+            )));
+        }
+
+        let cuda = &self.cuda;
+        cuda.row_device(self.emb_idx, token, self.x)?;
+
+        let mut li = 0usize;
+        let mut fi = 0usize;
+        for il in 0..d.n_layer {
+            let layer = &self.layers[il];
+            cuda.op_rmsnorm(self.x, layer.common.norm, self.norm, d.n_embd, self.eps)?;
+
+            if self.p.is_recurrent(il) {
+                let r = layer
+                    .rec
+                    .as_ref()
+                    .ok_or_else(|| Error::new("missing recurrent GPU layer"))?;
+                let state = &mut self.rec_states[li];
+                cuda.matvec_device(r.qkv, self.norm, self.qkv)?;
+                cuda.matvec_device(r.z, self.norm, self.z)?;
+                cuda.matvec_device(r.beta, self.norm, self.beta_raw)?;
+                cuda.matvec_device(r.alpha, self.norm, self.alpha_raw)?;
+                cuda.op_gate(
+                    self.alpha_raw,
+                    r.dt_bias.cast::<f32>(),
+                    r.a.cast::<f32>(),
+                    self.gate,
+                    d.nv,
+                )?;
+                cuda.op_sigmoid(self.beta_raw, self.beta, d.nv)?;
+
+                let hist_cur = state.hist[state.cur].cast::<f32>();
+                cuda.op_conv_silu(
+                    r.conv.cast::<f32>(),
+                    hist_cur,
+                    self.qkv,
+                    self.conv_out,
+                    d.channels,
+                    d.ksize,
+                    d.channels,
+                )?;
+
+                if d.hist_bytes > 0 {
+                    let next = 1 - state.cur;
+                    let dst = state.hist[next].cast::<f32>();
+                    cuda.zero(state.hist[next], d.hist_bytes)?;
+                    if d.ksize > 2 {
+                        for j in 0..(d.ksize - 2) {
+                            let old = hist_cur.wrapping_add((j + 1) as usize * d.channels as usize);
+                            cuda.op_add(
+                                dst.wrapping_add(j as usize * d.channels as usize),
+                                old,
+                                d.channels,
+                            )?;
+                        }
+                    }
+                    let last = (d.ksize - 2) as usize * d.channels as usize;
+                    cuda.op_add(dst.wrapping_add(last), self.qkv, d.channels)?;
+                    state.cur = next;
+                }
+
+                for h in 0..d.nk {
+                    cuda.op_l2norm(
+                        self.conv_out.wrapping_add((h * d.ds) as usize),
+                        d.ds,
+                        self.eps,
+                    )?;
+                    cuda.op_l2norm(
+                        self.conv_out.wrapping_add((d.key_dim + h * d.ds) as usize),
+                        d.ds,
+                        self.eps,
+                    )?;
+                }
+                cuda.op_gdn(
+                    self.conv_out,
+                    self.conv_out.wrapping_add(d.key_dim as usize),
+                    self.conv_out.wrapping_add((2 * d.key_dim) as usize),
+                    self.gate,
+                    self.beta,
+                    state.state.cast::<f32>(),
+                    self.gdn_out,
+                    d.nv,
+                    d.nk,
+                    d.ds,
+                )?;
+                for h in 0..d.nv {
+                    let head = self.gdn_out.wrapping_add((h * d.ds) as usize);
+                    let z_head = self.z.wrapping_add((h * d.ds) as usize);
+                    cuda.op_rmsnorm(head, r.norm.cast::<f32>(), head, d.ds, self.eps)?;
+                    cuda.op_silu_mul(head, z_head, head, d.ds)?;
+                }
+                cuda.matvec_device(r.out, self.gdn_out, self.attn)?;
+                li += 1;
+            } else {
+                let f = layer
+                    .full
+                    .as_ref()
+                    .ok_or_else(|| Error::new("missing full-attention GPU layer"))?;
+                let state = &self.full_states[fi];
+                cuda.matvec_device(f.q, self.norm, self.qkv)?;
+                cuda.zero(self.heads.cast::<c_void>(), d.head_bytes)?;
+                cuda.zero(self.gates.cast::<c_void>(), d.head_bytes)?;
+                for h in 0..d.n_head {
+                    let base = (h * 2 * d.hd) as usize;
+                    let q = self.heads.wrapping_add((h * d.hd) as usize);
+                    let g = self.gates.wrapping_add((h * d.hd) as usize);
+                    cuda.op_add(q, self.qkv.wrapping_add(base), d.hd)?;
+                    cuda.op_add(g, self.qkv.wrapping_add(base + d.hd as usize), d.hd)?;
+                    cuda.op_rmsnorm(q, f.q_norm.cast::<f32>(), q, d.hd, self.eps)?;
+                    cuda.op_rope(q, d.hd, self.n_rot, self.rope_base, pos as i32)?;
+                }
+                cuda.matvec_device(f.k, self.norm, self.head_k)?;
+                cuda.matvec_device(f.v, self.norm, self.head_v)?;
+                for h in 0..d.n_kv {
+                    let k = self.head_k.wrapping_add((h * d.hd) as usize);
+                    cuda.op_rmsnorm(k, f.k_norm.cast::<f32>(), k, d.hd, self.eps)?;
+                    cuda.op_rope(k, d.hd, self.n_rot, self.rope_base, pos as i32)?;
+                }
+                cuda.op_attn(
+                    self.heads,
+                    self.head_k,
+                    self.head_v,
+                    self.gates,
+                    state.kc.cast::<f32>(),
+                    state.vc.cast::<f32>(),
+                    self.attn_out,
+                    d.n_head,
+                    d.n_kv,
+                    d.hd,
+                    pos as i32,
+                    d.seq_cap,
+                    self.scale,
+                )?;
+                cuda.matvec_device(f.out, self.attn_out, self.attn)?;
+                fi += 1;
+            }
+
+            cuda.op_add(self.x, self.attn, d.n_embd)?;
+            cuda.op_rmsnorm(
+                self.x,
+                layer.common.post_norm,
+                self.norm2,
+                d.n_embd,
+                self.eps,
+            )?;
+            cuda.matvec_device(layer.common.up, self.norm2, self.up)?;
+            cuda.matvec_device(layer.common.gate, self.norm2, self.gate_ffn)?;
+            cuda.op_silu_mul(self.up, self.gate_ffn, self.up, d.n_ff)?;
+            cuda.matvec_device(layer.common.down, self.up, self.ffn)?;
+            cuda.op_add(self.x, self.ffn, d.n_embd)?;
+        }
+
+        cuda.op_rmsnorm(self.x, self.out_norm, self.h, d.n_embd, self.eps)?;
+        cuda.matvec_device(self.emb_idx, self.h, self.logits)?;
+        cuda.op_argmax(self.logits, d.vocab, self.argmax.cast::<i32>())?;
+        let mut next = 0i32;
+        cuda.read_i32(self.argmax.cast_const().cast::<c_void>(), &mut next)?;
+        Ok(next)
+    }
+}
+
+impl Drop for GpuWorkspace {
+    fn drop(&mut self) {
+        for &ptr in &self.buffers {
+            unsafe { self.cuda.free_buf(ptr) };
+        }
+    }
+}
