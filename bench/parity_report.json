@@ -3,8 +3,8 @@
   "tokens": 8,
   "prompts_file": "bench/parity_prompts.txt",
   "summary": {
-    "ok": 7,
-    "mismatch": 1,
+    "ok": 8,
+    "mismatch": 0,
     "error": 0
   },
   "results": [
@@ -33,13 +33,13 @@
     {
       "prompt_index": 2,
       "prompt": "Write Python: def add(a, b): return a + b  # explain the result",
-      "status": "MISMATCH",
+      "status": "ok",
       "cpu_output": "<think>\nThe user is asking me to",
-      "gpu_output": "<think>\n\n</think>\n\nThe code defines a",
+      "gpu_output": "<think>\nThe user is asking me to",
       "cpu_stderr": "",
       "gpu_stderr": "",
-      "first_mismatch": 1,
-      "snippet": "'The' != '</think>'"
+      "first_mismatch": -1,
+      "snippet": ""
     },
     {
       "prompt_index": 3,
