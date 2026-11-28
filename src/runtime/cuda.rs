@@ -40,6 +40,15 @@ unsafe extern "C" {
     fn lcr_gpu_row_device(ctx: *mut c_void, index: c_int, row: c_int, dst: *mut f32) -> c_int;
     fn lcr_gpu_matvec_device(ctx: *mut c_void, index: c_int, x: *const f32, out: *mut f32)
         -> c_int;
+    fn lcr_batch_matmul(
+        ctx: *mut c_void,
+        index: c_int,
+        x: *const f32,
+        out: *mut f32,
+        n_tokens: c_int,
+        x_stride: c_int,
+        out_stride: c_int,
+    ) -> c_int;
     fn lcr_gpu_read_i32(ctx: *mut c_void, src: *const c_void, dst: *mut c_int) -> c_int;
     fn lcr_gpu_sync(ctx: *mut c_void) -> c_int;
 
@@ -343,6 +352,21 @@ impl CudaWeights {
     pub(crate) fn matvec_device(&self, index: c_int, x: *const f32, out: *mut f32) -> Result<()> {
         let rc = unsafe { lcr_gpu_matvec_device(self.ctx, index, x, out) };
         check_rc("lcr_gpu_matvec_device", rc)
+    }
+
+    /// Async batched matmul: `out[t * out_stride + r] = W[index][r] dot x[t * x_stride]`.
+    pub(crate) fn batch_matmul(
+        &self,
+        index: c_int,
+        x: *const f32,
+        out: *mut f32,
+        n_tokens: c_int,
+        x_stride: c_int,
+        out_stride: c_int,
+    ) -> Result<()> {
+        let rc =
+            unsafe { lcr_batch_matmul(self.ctx, index, x, out, n_tokens, x_stride, out_stride) };
+        check_rc("lcr_batch_matmul", rc)
     }
 
     pub(crate) fn read_i32(&self, src: *const c_void, dst: &mut c_int) -> Result<()> {

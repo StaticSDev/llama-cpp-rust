@@ -14,6 +14,7 @@ fn main() {
         .args(["-O3", "-arch=sm_75", "-lib", "-o"])
         .arg(&archive)
         .arg("cuda/lcr_kernels.cu")
+        .arg("cuda/lcr_batch.cu")
         .status();
 
     match status {
@@ -32,6 +33,8 @@ fn main() {
     println!("cargo:rustc-link-lib=dylib=stdc++");
     println!("cargo:rerun-if-changed=cuda/lcr_kernels.cu");
     println!("cargo:rerun-if-changed=cuda/lcr_kernels.cuh");
+    println!("cargo:rerun-if-changed=cuda/lcr_batch.cu");
+    println!("cargo:rerun-if-changed=cuda/lcr_batch.cuh");
 }
 
 fn fail(reason: &str) -> ! {

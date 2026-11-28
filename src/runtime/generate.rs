@@ -104,12 +104,32 @@ pub fn generate_stream<F: FnMut(Event)>(
         next_token(w, &mut st, w.vocab.token_bos())?
     } else {
         let total = prompt_tokens.len();
-        let mut last = 0;
-        for (i, &tok) in prompt_tokens.iter().enumerate() {
-            last = next_token(w, &mut st, tok)?;
-            on_event(Event::Prompt { done: i + 1, total });
+        #[cfg(feature = "cuda")]
+        let gpu_candidate = {
+            let mut graph = w.gpu_graph_lock();
+            match graph.as_mut() {
+                Some(graph) => Some(graph.prefill_tokens(w, &prompt_tokens, st.pos)?),
+                None => None,
+            }
+        };
+        #[cfg(not(feature = "cuda"))]
+        let gpu_candidate: Option<i32> = None;
+
+        if let Some(next) = gpu_candidate {
+            st.pos += total;
+            // Batched prefill cannot report between tokens; replay the events.
+            for done in 1..=total {
+                on_event(Event::Prompt { done, total });
+            }
+            next
+        } else {
+            let mut last = 0;
+            for (i, &tok) in prompt_tokens.iter().enumerate() {
+                last = next_token(w, &mut st, tok)?;
+                on_event(Event::Prompt { done: i + 1, total });
+            }
+            last
         }
-        last
     };
     stats.prompt_tokens = prompt_tokens.len().max(1);
     stats.prompt_ms = prompt_start.elapsed().as_millis();
