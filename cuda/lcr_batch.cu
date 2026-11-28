@@ -144,6 +144,7 @@ struct BatchContext {
     float *d_x;
     float *d_y;
     LcrWeightMeta *metas;
+    LcrWeightMeta *d_metas; /* keep layout in sync with LcrContext */
     int count;
 };
 
