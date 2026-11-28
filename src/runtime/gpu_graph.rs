@@ -849,8 +849,12 @@ impl GpuWorkspace {
                             d.seq_cap,
                             self.scale,
                         )?;
-                        fi += 1;
                     }
+                }
+                if self.p.is_recurrent(il) {
+                    li += 1;
+                } else {
+                    fi += 1;
                 }
 
                 if self.p.is_recurrent(il) {
